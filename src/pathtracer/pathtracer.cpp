@@ -152,8 +152,9 @@ PathTracer::estimate_direct_lighting_importance(const Ray &r,
         continue;
       }
 
-      double tr = medium ? medium->ray_transmittance(shadow_ray, dist_to_light) : 1.0;
-      light_contrib += isect.bsdf->f(w_out, wi) * radiance * abs_cos_theta(wi) * tr / pdf;
+      Vector3D tr = medium ? medium->ray_transmittance(shadow_ray, dist_to_light)
+                           : Vector3D(1.0);
+      light_contrib += tr * isect.bsdf->f(w_out, wi) * radiance * abs_cos_theta(wi) / pdf;
     }
 
     L_out += light_contrib / num_samples;
@@ -178,8 +179,9 @@ Vector3D PathTracer::estimate_vol_direct_lighting(const Vector3D& p) {
     Intersection blocker;
     if (bvh->intersect(shadow_ray, &blocker)) continue;
 
-    double tr = medium ? medium->ray_transmittance(shadow_ray, dist_to_light) : 1.0;
-    L_out += phase_isotropic() * radiance * tr / pdf;
+    Vector3D tr = medium ? medium->ray_transmittance(shadow_ray, dist_to_light)
+                         : Vector3D(1.0);
+    L_out += tr * phase_isotropic() * radiance / pdf;
   }
   return L_out;
 }
@@ -262,13 +264,16 @@ Vector3D PathTracer::est_radiance_global_illumination(const Ray &r) {
         // The recursive indirect term (random direction bounce) is the dominant
         // noise source — dropping it eliminates graininess at minimal visual cost
         // for fog lit from above where inter-surface bounces through the fog are subtle.
-        L_out = medium->albedo * estimate_vol_direct_lighting(scatter_p);
+        // Chromatic albedo weight: sigma_s_c / sigma_t_c (per channel).
+        L_out = medium->albedo_c() * estimate_vol_direct_lighting(scatter_p);
         return L_out;
 
       } else {
-        // SURFACE EVENT — attenuate by transmittance across the medium segment only
+        // SURFACE EVENT — attenuate by chromatic transmittance across the
+        // medium segment. This gives rise to depth-dependent color shift
+        // (red attenuates faster than blue in an underwater medium).
         if (!hit) return envLight ? envLight->sample_dir(r) : L_out;
-        double tr = medium->det_transmittance(r, t_enter, seg_end);
+        Vector3D tr = medium->det_transmittance(r, t_enter, seg_end);
         L_out = tr * (zero_bounce_radiance(r, isect) + one_bounce_radiance(r, isect));
         return L_out;
       }

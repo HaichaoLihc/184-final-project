@@ -1,45 +1,67 @@
 #pragma once
 
 #include <cmath>
+#include <cstdlib>
+#include <limits>
+
 #include "scene/bbox.h"
 #include "util/random_util.h"
 
 namespace CGL {
 
+// Participating medium with wavelength-dependent (chromatic) absorption
+// (sigma_a) and scattering (sigma_s) coefficients. Optional heterogeneous
+// density via a height-based smoothstep falloff, and optional bounded region
+// via a BBox. Delta tracking is used for free-flight sampling; transmittance
+// is evaluated per channel.
+//
+// Environment-variable overrides (read in the constructor):
+//   MEDIUM_SIGMA_A, MEDIUM_SIGMA_S                 -- scalar (all channels)
+//   MEDIUM_SIGMA_A_R/G/B, MEDIUM_SIGMA_S_R/G/B     -- per-channel override
+//   MEDIUM_MAX_DIST                                -- shadow-ray cap for
+//                                                     directional / infinite
+//                                                     lights (default +inf)
 struct Medium {
-    double sigma_a;      // absorption at maximum density
-    double sigma_s;      // scattering at maximum density
-    double sigma_t;      // extinction at maximum density = sigma_a + sigma_s
-    double albedo;       // sigma_s / sigma_t
-    BBox*  bounds;       // nullptr = scene-wide; non-null = bounded region
-    double fade_height;  // y-coordinate where fog fades to zero (0 = hard boundary)
+    Vector3D sigma_a;
+    Vector3D sigma_s;
+    BBox*    bounds;        ///< nullptr = scene-wide
+    double   fade_height;   ///< 0 = homogeneous; otherwise smoothstep in y
+    double   max_shadow_dist; ///< cap for directional/infinite-light shadow rays
 
+    // Scalar constructor kept for backward compatibility. Env vars override.
     Medium(double sa, double ss, BBox* b = nullptr, double fh = 0.0)
         : sigma_a(sa), sigma_s(ss),
-          sigma_t(sa + ss),
-          albedo(ss / (sa + ss)),
           bounds(b),
-          fade_height(fh) {}
+          fade_height(fh),
+          max_shadow_dist(std::numeric_limits<double>::infinity()) {
+        override_from_env();
+    }
 
-    // --- Heterogeneous density ---
+    // --- Coefficient accessors ---
 
-    // Local extinction at world position p.
-    // Homogeneous if fade_height == 0; smoothstep falloff in y otherwise.
-    double density(const Vector3D& p) const {
-        if (fade_height <= 0.0) return sigma_t;
-        // smoothstep: full density at y=0, zero at y=fade_height
+    Vector3D sigma_t() const { return sigma_a + sigma_s; }
+    double sigma_t_avg() const {
+        Vector3D st = sigma_t();
+        return (st.x + st.y + st.z) / 3.0;
+    }
+    // Chromatic single-scattering albedo (per channel).
+    Vector3D albedo_c() const {
+        Vector3D st = sigma_t();
+        return Vector3D(st.x > 1e-8 ? sigma_s.x / st.x : 0.0,
+                        st.y > 1e-8 ? sigma_s.y / st.y : 0.0,
+                        st.z > 1e-8 ? sigma_s.z / st.z : 0.0);
+    }
+
+    // --- Heterogeneous density multiplier in [0,1] ---
+    // Homogeneous (=1) if fade_height == 0; smoothstep falloff in y otherwise.
+    double density_scale(const Vector3D& p) const {
+        if (fade_height <= 0.0) return 1.0;
         double t = std::max(0.0, std::min(1.0, p.y / fade_height));
-        double s = t * t * (3.0 - 2.0 * t);   // smoothstep 0→1
-        return sigma_t * (1.0 - s);
+        double s = t * t * (3.0 - 2.0 * t);  // smoothstep 0->1
+        return 1.0 - s;
     }
 
-    double density_albedo(const Vector3D& p) const {
-        // albedo stays constant, only total density varies
-        return albedo;
-    }
-
-    // --- Ray segment clipping ---
-
+    // --- Ray segment clipping against the medium bounds ---
     bool clip_ray(const Ray& r, double& t_enter, double& t_exit) const {
         if (!bounds) {
             t_enter = r.min_t;
@@ -53,59 +75,85 @@ struct Medium {
         return t_enter < t_exit;
     }
 
-    // --- Free-path sampling via delta tracking ---
-    // Works for both homogeneous and heterogeneous density.
-    // Returns distance from t_start to scatter event, or INF_D if ray escapes to t_end.
+    // --- Free-path sampling via delta tracking (scalar majorant) ---
+    // For chromatic media, distance sampling uses sigma_t_avg as majorant.
+    // Returns absolute t in [t_start, t_end) for a real collision, or INF_D
+    // if the ray escapes the segment.
     double delta_track(const Ray& r, double t_start, double t_end) const {
+        double sigma_maj = sigma_t_avg();
+        if (sigma_maj <= 1e-8) return INF_D;
         if (fade_height <= 0.0) {
-            // Homogeneous: simple inverse CDF, much faster
-            double s = -std::log(1.0 - random_uniform()) / sigma_t;
+            double s = -std::log(1.0 - random_uniform()) / sigma_maj;
             return (t_start + s < t_end) ? t_start + s : INF_D;
         }
-        // Heterogeneous: null-collision (Woodcock) tracking
-        // sigma_t is the majorant (max density across the volume)
+        // Woodcock / null-collision tracking.
         double t = t_start;
         while (true) {
-            t -= std::log(1.0 - random_uniform()) / sigma_t;  // sample with majorant
+            t -= std::log(1.0 - random_uniform()) / sigma_maj;
             if (t >= t_end) return INF_D;
             Vector3D p = r.o + t * r.d;
-            double local = density(p);
-            if (random_uniform() < local / sigma_t) return t;  // real collision
-            // else: null collision, continue
+            double local = density_scale(p);  // in [0, 1]
+            if (random_uniform() < local) return t;
         }
     }
 
-    // --- Deterministic transmittance via numerical quadrature ---
-    // Uses midpoint-rule integration — no random samples, so zero variance.
-    // 32 steps is accurate for smooth density functions like smoothstep.
-    double det_transmittance(const Ray& r, double t_start, double t_end) const {
+    // --- Chromatic transmittance along a segment [t_start, t_end] ---
+    // Homogeneous: closed-form three-channel Beer-Lambert.
+    // Heterogeneous: midpoint-rule quadrature of scalar optical depth
+    // integrated with chromatic sigma_t (zero-variance, 32 steps).
+    Vector3D det_transmittance(const Ray& r, double t_start, double t_end) const {
+        if (t_end <= t_start) return Vector3D(1.0);
+        Vector3D st = sigma_t();
         if (fade_height <= 0.0) {
-            // Homogeneous: exact analytic result
             double seg = t_end - t_start;
-            return (seg <= 0.0) ? 1.0 : std::exp(-sigma_t * seg);
+            return Vector3D(std::exp(-st.x * seg),
+                            std::exp(-st.y * seg),
+                            std::exp(-st.z * seg));
         }
         const int N = 32;
         double dt = (t_end - t_start) / N;
-        double tau = 0.0;
-        for (int i = 0; i < N; i++) {
+        double tau_scalar = 0.0;
+        for (int i = 0; i < N; ++i) {
             double t_mid = t_start + (i + 0.5) * dt;
-            tau += density(r.o + t_mid * r.d) * dt;
+            tau_scalar += density_scale(r.o + t_mid * r.d) * dt;
         }
-        return std::exp(-tau);
+        return Vector3D(std::exp(-st.x * tau_scalar),
+                        std::exp(-st.y * tau_scalar),
+                        std::exp(-st.z * tau_scalar));
     }
 
-    // Transmittance for a shadow ray — clips to bounds, then integrates deterministically
-    double ray_transmittance(const Ray& r, double dist) const {
+    // Shadow-ray transmittance: clipped to bounds and capped by
+    // max_shadow_dist so directional / env lights still contribute.
+    Vector3D ray_transmittance(const Ray& r, double dist) const {
         double t_enter, t_exit;
-        if (!clip_ray(r, t_enter, t_exit)) return 1.0;
+        if (!clip_ray(r, t_enter, t_exit)) return Vector3D(1.0);
         double seg_end = std::min(t_exit, dist);
-        if (seg_end <= t_enter) return 1.0;
+        if (seg_end <= t_enter) return Vector3D(1.0);
+        seg_end = std::min(seg_end, t_enter + max_shadow_dist);
         return det_transmittance(r, t_enter, seg_end);
+    }
+
+    // --- Environment-variable overrides ---
+    void override_from_env() {
+        auto rd = [](const char* k, double def) {
+            const char* v = std::getenv(k);
+            return v ? std::atof(v) : def;
+        };
+        double a_scalar = rd("MEDIUM_SIGMA_A", -1.0);
+        double s_scalar = rd("MEDIUM_SIGMA_S", -1.0);
+        if (a_scalar >= 0.0) sigma_a = Vector3D(a_scalar);
+        if (s_scalar >= 0.0) sigma_s = Vector3D(s_scalar);
+        sigma_a.x = rd("MEDIUM_SIGMA_A_R", sigma_a.x);
+        sigma_a.y = rd("MEDIUM_SIGMA_A_G", sigma_a.y);
+        sigma_a.z = rd("MEDIUM_SIGMA_A_B", sigma_a.z);
+        sigma_s.x = rd("MEDIUM_SIGMA_S_R", sigma_s.x);
+        sigma_s.y = rd("MEDIUM_SIGMA_S_G", sigma_s.y);
+        sigma_s.z = rd("MEDIUM_SIGMA_S_B", sigma_s.z);
+        max_shadow_dist = rd("MEDIUM_MAX_DIST", max_shadow_dist);
     }
 };
 
-// Isotropic phase function: uniform over full sphere
-// eval/pdf = (1/4π)/(1/4π) = 1 when direction sampled from phase fn
+// Isotropic phase function: p(w, w') = 1/(4π).
 inline double phase_isotropic() {
     return 1.0 / (4.0 * M_PI);
 }
