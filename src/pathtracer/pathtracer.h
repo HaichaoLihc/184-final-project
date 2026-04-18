@@ -53,6 +53,13 @@ namespace CGL {
         Vector3D estimate_direct_lighting_importance(const Ray& r, const SceneObjects::Intersection& isect);
         Vector3D estimate_vol_direct_lighting(const Vector3D& p);
 
+        // Equiangular + distance-sampling MIS integrator for single-scatter
+        // direct lighting along a camera ray segment [t_enter, t_exit] that
+        // lies inside the participating medium.
+        Vector3D estimate_vol_direct_lighting_mis(const Ray& r,
+                                                  double t_enter,
+                                                  double t_exit);
+
         Vector3D est_radiance_global_illumination(const Ray& r);
         Vector3D zero_bounce_radiance(const Ray& r, const SceneObjects::Intersection& isect);
         Vector3D one_bounce_radiance(const Ray& r, const SceneObjects::Intersection& isect);

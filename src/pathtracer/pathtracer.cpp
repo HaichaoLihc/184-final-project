@@ -164,6 +164,154 @@ PathTracer::estimate_direct_lighting_importance(const Ray &r,
 
 }
 
+// ---------------------------------------------------------------------------
+// Equiangular + distance-sampling MIS integrator for volumetric single-scatter
+// direct lighting along a camera ray segment inside the participating medium.
+//
+// For each light sample, we combine two sampling strategies over the segment:
+//   (a) equiangular sampling — density concentrated near the light; excellent
+//       for point / spot / area lights (god-ray peaks).
+//   (b) truncated-exponential sampling — matches Beer-Lambert falloff; good
+//       for "close" scatter near the camera.
+// Contributions are weighted with the two-strategy power heuristic (β = 2).
+//
+// Directional / infinite-distance lights are not amenable to equiangular
+// sampling (no finite light position); for those we fall back to the
+// truncated-exponential estimator alone.
+//
+// Integrand for one light is the in-scattering integral:
+//   ∫_{t_enter}^{t_exit}
+//     T_cam(t) · σ_s · p(ω, ω') · T_sh(p_scat → p_light) · L_i / pdf_light  dt
+Vector3D PathTracer::estimate_vol_direct_lighting_mis(const Ray& r,
+                                                      double t_enter,
+                                                      double t_exit) {
+  Vector3D L_out;
+  if (!medium) return L_out;
+  if (t_exit <= t_enter) return L_out;
+
+  const double sigma_avg = medium->sigma_t_avg();
+  const Vector3D sigma_s = medium->sigma_s;
+  const double  phase_f = phase_isotropic();
+  const double  seg     = t_exit - t_enter;
+  const Vector3D ref_p  = r.o + r.d * (t_enter + 0.5 * seg);
+  const bool    dt_valid = sigma_avg > 1e-8;
+
+  // Helper: single-scatter direct-lighting integrand at ray distance t, using
+  // a specific light-point sample (p_light) whose radiance we already have.
+  auto eval_at = [&](double t, const Vector3D& p_light,
+                     const Vector3D& radiance,
+                     double pdf_light) -> Vector3D {
+    if (t <= t_enter || t >= t_exit) return Vector3D();
+    const Vector3D p_scat = r.o + t * r.d;
+    const Vector3D to_light = p_light - p_scat;
+    const double   dist = to_light.norm();
+    if (dist < EPS_F) return Vector3D();
+    const Vector3D wi = to_light / dist;
+
+    Ray shadow_ray(p_scat, wi);
+    shadow_ray.min_t = EPS_F;
+    shadow_ray.max_t = dist - EPS_F;
+    Intersection blocker;
+    if (bvh->intersect(shadow_ray, &blocker)) return Vector3D();
+
+    const Vector3D T_cam = medium->det_transmittance(r, t_enter, t);
+    const Vector3D T_sh  = medium->ray_transmittance(shadow_ray, dist);
+    return (T_cam * sigma_s * T_sh * radiance) * (phase_f / pdf_light);
+  };
+
+  for (SceneLight* light : scene->lights) {
+    const int num_samples = light->is_delta_light() ? 1 : ns_area_light;
+    Vector3D light_contrib;
+
+    for (int i = 0; i < num_samples; ++i) {
+      // Draw a light sample from the midpoint of the segment. For area lights
+      // this fixes a specific point on the light that both sampling strategies
+      // target during MIS.
+      Vector3D wi_world;
+      double dist_to_light, pdf_light;
+      const Vector3D radiance =
+          light->sample_L(ref_p, &wi_world, &dist_to_light, &pdf_light);
+      if (pdf_light <= 0.0 || radiance == Vector3D()) continue;
+
+      // Classify light by finite vs. infinite distance.
+      const bool finite_light = dist_to_light < 1e6;
+      const Vector3D p_light  = finite_light
+                                   ? ref_p + wi_world * dist_to_light
+                                   : Vector3D();  // unused for infinite lights
+
+      if (!finite_light) {
+        // ----- Directional / infinite-distance: distance sampling only -----
+        if (!dt_valid) continue;
+        double pdf_dt;
+        const double t = truncexp_sample(sigma_avg, t_enter, t_exit,
+                                         random_uniform(), &pdf_dt);
+        const Vector3D p_scat = r.o + t * r.d;
+
+        // Re-sample the light at the actual scatter point so the direction /
+        // distance used for the shadow ray is consistent.
+        Vector3D wi_s; double d_s, pdf_s;
+        const Vector3D rad_s =
+            light->sample_L(p_scat, &wi_s, &d_s, &pdf_s);
+        if (pdf_s <= 0.0 || rad_s == Vector3D()) continue;
+        Ray shadow(p_scat, wi_s);
+        shadow.min_t = EPS_F;
+        shadow.max_t = d_s - EPS_F;
+        Intersection blocker;
+        if (bvh->intersect(shadow, &blocker)) continue;
+
+        const Vector3D T_cam = medium->det_transmittance(r, t_enter, t);
+        const Vector3D T_sh  = medium->ray_transmittance(shadow, d_s);
+        light_contrib += (T_cam * sigma_s * T_sh * rad_s)
+                         * (phase_f / (pdf_s * pdf_dt));
+        continue;
+      }
+
+      // ----- Finite-distance: equiangular + truncated-exp MIS -----
+      EquiangularSampler eq(r.o, r.d, p_light, t_enter, t_exit);
+
+      if (!eq.valid) {
+        // Degenerate geometry (ray nearly through light); fall back to
+        // distance sampling alone.
+        if (!dt_valid) continue;
+        double pdf_dt;
+        const double t = truncexp_sample(sigma_avg, t_enter, t_exit,
+                                         random_uniform(), &pdf_dt);
+        light_contrib += eval_at(t, p_light, radiance, pdf_light) / pdf_dt;
+        continue;
+      }
+
+      // Strategy (a): equiangular
+      {
+        double pdf_eq;
+        const double t_eq = eq.sample(random_uniform(), &pdf_eq);
+        if (pdf_eq > 0.0 && t_eq > t_enter && t_eq < t_exit) {
+          const double pdf_dt_at_eq =
+              dt_valid ? truncexp_pdf(sigma_avg, t_enter, t_exit, t_eq) : 0.0;
+          const double w_eq = mis_power2(pdf_eq, pdf_dt_at_eq);
+          light_contrib +=
+              w_eq * eval_at(t_eq, p_light, radiance, pdf_light) / pdf_eq;
+        }
+      }
+
+      // Strategy (b): truncated exponential
+      if (dt_valid) {
+        double pdf_dt;
+        const double t_dt = truncexp_sample(sigma_avg, t_enter, t_exit,
+                                            random_uniform(), &pdf_dt);
+        if (pdf_dt > 0.0) {
+          const double pdf_eq_at_dt = eq.pdf_at(t_dt);
+          const double w_dt = mis_power2(pdf_dt, pdf_eq_at_dt);
+          light_contrib +=
+              w_dt * eval_at(t_dt, p_light, radiance, pdf_light) / pdf_dt;
+        }
+      }
+    }
+
+    L_out += light_contrib / num_samples;
+  }
+  return L_out;
+}
+
 Vector3D PathTracer::estimate_vol_direct_lighting(const Vector3D& p) {
   Vector3D L_out;
   for (SceneLight* light : scene->lights) {
@@ -249,34 +397,26 @@ Vector3D PathTracer::est_radiance_global_illumination(const Ray &r) {
       double seg_end = std::min(t_exit, d);
       if (seg_end <= t_enter) goto surface_path;
 
-      // Delta tracking: returns absolute t along ray, or INF_D if escaped to seg_end
-      double t_scatter = medium->delta_track(r, t_enter, seg_end);
+      // Volumetric single-scatter direct lighting via equiangular +
+      // truncated-exp MIS (Kulla & Fajardo 2012). Integrates the
+      // in-scattering term over the entire medium segment in one pass per
+      // light — no delta tracking needed for the single-scatter estimator.
+      Vector3D L_vol = estimate_vol_direct_lighting_mis(r, t_enter, seg_end);
 
-      if (t_scatter < INF_D) {
-        // MEDIUM SCATTER EVENT
-        // Weight: albedo (T_r*sigma_s / pdf cancels via delta tracking acceptance)
-        Vector3D scatter_p = r.o + t_scatter * r.d;
-
-        UniformSphereSampler3D sphere_sampler;
-        Vector3D new_dir = sphere_sampler.get_sample();
-
-        // Single-scatter approximation: direct lighting only at each scatter point.
-        // The recursive indirect term (random direction bounce) is the dominant
-        // noise source — dropping it eliminates graininess at minimal visual cost
-        // for fog lit from above where inter-surface bounces through the fog are subtle.
-        // Chromatic albedo weight: sigma_s_c / sigma_t_c (per channel).
-        L_out = medium->albedo_c() * estimate_vol_direct_lighting(scatter_p);
-        return L_out;
-
-      } else {
-        // SURFACE EVENT — attenuate by chromatic transmittance across the
-        // medium segment. This gives rise to depth-dependent color shift
-        // (red attenuates faster than blue in an underwater medium).
-        if (!hit) return envLight ? envLight->sample_dir(r) : L_out;
+      // Surface / environment contribution attenuated by chromatic
+      // transmittance across the full medium segment. Depth-dependent color
+      // shift (red attenuates faster than blue) emerges naturally from the
+      // per-channel Beer-Lambert factor.
+      Vector3D L_surf;
+      if (hit) {
         Vector3D tr = medium->det_transmittance(r, t_enter, seg_end);
-        L_out = tr * (zero_bounce_radiance(r, isect) + one_bounce_radiance(r, isect));
-        return L_out;
+        L_surf = tr * (zero_bounce_radiance(r, isect) + one_bounce_radiance(r, isect));
+      } else if (envLight) {
+        Vector3D tr = medium->det_transmittance(r, t_enter, seg_end);
+        L_surf = tr * envLight->sample_dir(r);
       }
+
+      return L_vol + L_surf;
     }
   }
 
