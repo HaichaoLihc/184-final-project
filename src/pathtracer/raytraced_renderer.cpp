@@ -53,11 +53,25 @@ RaytracedRenderer::RaytracedRenderer(size_t ns_aa,
 
   pt = new PathTracer();
 
-  // Volumetric medium: Medium(sigma_a, sigma_s). Set to nullptr to disable.
-  // Soft ground fog: smoothstep falloff from y=0 (full density) to y=0.9 (zero)
-  // fade_height=0.9 is passed as 4th arg — density uses smoothstep in y
-  BBox* fog_region = new BBox(Vector3D(-1.0, 0.0, -1.0), Vector3D(1.0, 0.9, 1.0));
-  pt->medium = new Medium(0.15, 0.5, fog_region, 0.9);  // sigma_t=0.65, albedo=0.77
+  // Volumetric medium: underwater Cornell Box (Plan A demo).
+  // BBox covers the entire Cornell Box interior (CBdragon/CBbunny/CBlucy all
+  // span roughly [-1,1]^3 with ceiling at y=1.5). Homogeneous (fade_height=0)
+  // so the whole box is "water". Chromatic sigma approximates sea water:
+  // strong red absorption, weak blue absorption -> depth-dependent teal shift.
+  // sigma_s uniform for visible god rays from the ceiling light.
+  // Water surface (glass slab with IOR 1.33) sits at y = 1.1 in CBbunny_water.
+  // Medium BBox extends only BELOW the surface: y <= 1.1.
+  // Above y=1.1 is air (vacuum), so the area light at y=1.49 refracts through
+  // the water surface and produces real Snell / Fresnel caustics underwater.
+  BBox* fog_region = new BBox(Vector3D(-1.05, -1.05, -1.05),
+                              Vector3D( 1.05,  1.10,  1.05));
+  // sigma_a (per channel): R high, G mid, B low  -> water turns teal with depth
+  // sigma_s: uniform, moderate -> god rays visible without washing out scene
+  // Pass via scalar ctor then override per-channel in-place.
+  Medium* water = new Medium(0.0, 0.0, fog_region, 0.0);
+  water->sigma_a = Vector3D(0.35, 0.10, 0.03);
+  water->sigma_s = Vector3D(0.20, 0.25, 0.30);
+  pt->medium = water;
 
   pt->ns_aa = ns_aa;                                        // Number of samples per pixel
   pt->max_ray_depth = max_ray_depth;                        // Maximum recursion ray depth

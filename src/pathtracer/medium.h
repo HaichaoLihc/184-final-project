@@ -158,4 +158,98 @@ inline double phase_isotropic() {
     return 1.0 / (4.0 * M_PI);
 }
 
+// ---------------------------------------------------------------------------
+// Equiangular sampling along a ray segment towards a point light.
+//
+// References:
+//   Kulla & Fajardo, "Importance Sampling Techniques for Path Tracing in
+//   Participating Media", EGSR 2012.
+//
+// Given a camera ray (o, d), a point light at p_L, and a ray-segment
+// [t_near, t_far], equiangular sampling draws t* with density concentrated
+// near the light — the region where the single-scatter integrand is sharp.
+//
+//   t_star = dot(p_L - o, d)               (closest-point param on ray)
+//   D      = |p_L - (o + t_star * d)|      (perpendicular distance)
+//   theta_a = atan((t_near - t_star) / D)
+//   theta_b = atan((t_far  - t_star) / D)
+//   theta  = lerp(theta_a, theta_b, u)
+//   t      = t_star + D * tan(theta)
+//   pdf(t) = D / ((D^2 + (t - t_star)^2) * (theta_b - theta_a))
+//
+// Returns false if the geometry degenerates (D ≈ 0 or empty interval); in
+// that case the caller should fall back to distance sampling only.
+struct EquiangularSampler {
+    double t_star;
+    double D;
+    double theta_a;
+    double theta_b;
+    double dtheta;
+    bool valid;
+
+    EquiangularSampler(const Vector3D& o, const Vector3D& d,
+                       const Vector3D& p_light,
+                       double t_near, double t_far) {
+        t_star = dot(p_light - o, d);
+        Vector3D q = o + d * t_star;
+        D = (p_light - q).norm();
+        if (D < 1e-4 || t_far <= t_near) {
+            valid = false;
+            theta_a = theta_b = dtheta = 0.0;
+            return;
+        }
+        theta_a = std::atan((t_near - t_star) / D);
+        theta_b = std::atan((t_far  - t_star) / D);
+        dtheta  = theta_b - theta_a;
+        valid   = dtheta > 1e-6;
+    }
+
+    // Sample a distance t along the ray given uniform u in [0,1].
+    double sample(double u, double* pdf) const {
+        double theta = theta_a + u * dtheta;
+        double t = t_star + D * std::tan(theta);
+        if (pdf) *pdf = pdf_at(t);
+        return t;
+    }
+
+    // Evaluate the pdf at an arbitrary t (for MIS weighting).
+    double pdf_at(double t) const {
+        if (!valid) return 0.0;
+        double dt = t - t_star;
+        return D / ((D * D + dt * dt) * dtheta);
+    }
+};
+
+// Truncated-exponential distance sampling over [t_near, t_far] with
+// parameter sigma. pdf is normalized over the interval so that it and
+// equiangular pdfs can be combined under MIS on the same domain.
+inline double truncexp_sample(double sigma, double t_near, double t_far,
+                              double u, double* pdf) {
+    double seg = t_far - t_near;
+    double denom = 1.0 - std::exp(-sigma * seg);
+    if (denom < 1e-12) {
+        if (pdf) *pdf = 1.0 / std::max(seg, 1e-12);
+        return t_near + u * seg;
+    }
+    double t = t_near - std::log(1.0 - u * denom) / sigma;
+    if (pdf) *pdf = sigma * std::exp(-sigma * (t - t_near)) / denom;
+    return t;
+}
+
+inline double truncexp_pdf(double sigma, double t_near, double t_far, double t) {
+    if (t < t_near || t > t_far) return 0.0;
+    double seg = t_far - t_near;
+    double denom = 1.0 - std::exp(-sigma * seg);
+    if (denom < 1e-12) return 1.0 / std::max(seg, 1e-12);
+    return sigma * std::exp(-sigma * (t - t_near)) / denom;
+}
+
+// Power heuristic (beta = 2) for two-strategy MIS.
+inline double mis_power2(double pdf_a, double pdf_b) {
+    double a2 = pdf_a * pdf_a;
+    double b2 = pdf_b * pdf_b;
+    double s = a2 + b2;
+    return s > 0.0 ? a2 / s : 0.0;
+}
+
 } // namespace CGL
