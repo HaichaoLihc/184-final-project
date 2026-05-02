@@ -191,7 +191,7 @@ Vector3D PathTracer::estimate_vol_direct_lighting_mis(const Ray& r,
 
   const double sigma_avg = medium->sigma_t_avg();
   const Vector3D sigma_s = medium->sigma_s;
-  const double  phase_f = phase_isotropic();
+  const double  hg_g     = medium->hg_g;
   const double  seg     = t_exit - t_enter;
   const Vector3D ref_p  = r.o + r.d * (t_enter + 0.5 * seg);
   const bool    dt_valid = sigma_avg > 1e-8;
@@ -216,6 +216,9 @@ Vector3D PathTracer::estimate_vol_direct_lighting_mis(const Ray& r,
 
     const Vector3D T_cam = medium->det_transmittance(r, t_enter, t);
     const Vector3D T_sh  = medium->ray_transmittance(shadow_ray, dist);
+    // Henyey-Greenstein phase: cos θ between incoming (light → scatter,
+    // i.e. -wi) and outgoing (scatter → camera, i.e. -r.d) is dot(wi, r.d).
+    const double phase_f = phase_hg(dot(wi, r.d), hg_g);
     return (T_cam * sigma_s * T_sh * radiance) * (phase_f / pdf_light);
   };
 
@@ -261,6 +264,7 @@ Vector3D PathTracer::estimate_vol_direct_lighting_mis(const Ray& r,
 
         const Vector3D T_cam = medium->det_transmittance(r, t_enter, t);
         const Vector3D T_sh  = medium->ray_transmittance(shadow, d_s);
+        const double phase_f = phase_hg(dot(wi_s, r.d), hg_g);
         light_contrib += (T_cam * sigma_s * T_sh * rad_s)
                          * (phase_f / (pdf_s * pdf_dt));
         continue;

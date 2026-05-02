@@ -28,13 +28,47 @@ struct Medium {
     double   fade_height;   ///< 0 = homogeneous; otherwise smoothstep in y
     double   max_shadow_dist; ///< cap for directional/infinite-light shadow rays
 
+    // Wavy top-face perturbation. The top face of the medium BBox is at
+    // y = bounds->max.y; with boundary_amp > 0 we instead treat it as
+    //   y_top(x, z) = bounds->max.y + boundary_amp * h(x, z)
+    // where h is a sum of sinusoids. This produces (x, z)-dependent path
+    // lengths through the medium for both camera rays entering from above
+    // and shadow rays exiting upward — i.e. the visual signature of "god
+    // rays under a wavy water surface". No geometry change; only the
+    // analytic ray-segment endpoints in clip_ray() shift.
+    double   boundary_amp;
+    double   boundary_freq;
+
+    // Henyey-Greenstein phase-function asymmetry parameter g in (-1, 1).
+    //   g = 0       -> isotropic (default)
+    //   g > 0       -> forward-peaked (ocean water typical g ~ 0.85)
+    //   g < 0       -> backward-peaked
+    // Anisotropic forward scattering is what makes single-scatter shafts /
+    // god rays actually visible in water and fog: the in-scatter integrand
+    // becomes sharply peaked when the camera ray, scatter point, and light
+    // are roughly collinear. With isotropic scatter no shaft is ever
+    // distinguishable from background — the volume just looks like flat fog.
+    double   hg_g;
+
     // Scalar constructor kept for backward compatibility. Env vars override.
     Medium(double sa, double ss, BBox* b = nullptr, double fh = 0.0)
         : sigma_a(sa), sigma_s(ss),
           bounds(b),
           fade_height(fh),
-          max_shadow_dist(std::numeric_limits<double>::infinity()) {
+          max_shadow_dist(std::numeric_limits<double>::infinity()),
+          boundary_amp(0.0),
+          boundary_freq(8.0),
+          hg_g(0.0) {
         override_from_env();
+    }
+
+    // Sum-of-sinusoids height field h(x, z) for the wavy top face. Range
+    // roughly in [-1.5, 1.5]; multiplied by boundary_amp at the call site.
+    double boundary_height(double x, double z) const {
+        const double k1 = boundary_freq;
+        const double k2 = boundary_freq * 1.7;
+        return std::sin(k1 * x + 0.31) * std::cos(k1 * z + 1.27)
+             + 0.5 * std::sin(k2 * (x + z) + 2.11);
     }
 
     // --- Coefficient accessors ---
@@ -62,6 +96,10 @@ struct Medium {
     }
 
     // --- Ray segment clipping against the medium bounds ---
+    // When boundary_amp > 0, whichever endpoint corresponds to the top face
+    // (y ≈ bounds->max.y) is shifted by amp * h(x, z) / r.d.y, which is the
+    // first-order solution of r.o.y + t * r.d.y = ymax + amp * h(x, z) at
+    // the unperturbed (x, z). Accurate to O(amp^2) for small amplitudes.
     bool clip_ray(const Ray& r, double& t_enter, double& t_exit) const {
         if (!bounds) {
             t_enter = r.min_t;
@@ -70,6 +108,20 @@ struct Medium {
         }
         double t0 = 0.0, t1 = INF_D;
         if (!bounds->intersect(r, t0, t1)) return false;
+
+        if (boundary_amp > 0.0 && std::abs(r.d.y) > 1e-6) {
+            const double ymax = bounds->max.y;
+            for (double* tp : {&t0, &t1}) {
+                const double y_at = r.o.y + (*tp) * r.d.y;
+                if (std::abs(y_at - ymax) < 1e-3) {
+                    const double x = r.o.x + (*tp) * r.d.x;
+                    const double z = r.o.z + (*tp) * r.d.z;
+                    *tp = (ymax + boundary_amp * boundary_height(x, z) - r.o.y) / r.d.y;
+                }
+            }
+            if (t0 > t1) std::swap(t0, t1);
+        }
+
         t_enter = std::max(t0, r.min_t);
         t_exit  = t1;
         return t_enter < t_exit;
@@ -150,12 +202,23 @@ struct Medium {
         sigma_s.y = rd("MEDIUM_SIGMA_S_G", sigma_s.y);
         sigma_s.z = rd("MEDIUM_SIGMA_S_B", sigma_s.z);
         max_shadow_dist = rd("MEDIUM_MAX_DIST", max_shadow_dist);
+        boundary_amp    = rd("MEDIUM_BOUNDARY_AMP",  boundary_amp);
+        boundary_freq   = rd("MEDIUM_BOUNDARY_FREQ", boundary_freq);
+        hg_g            = rd("MEDIUM_HG_G",          hg_g);
     }
 };
 
 // Isotropic phase function: p(w, w') = 1/(4π).
 inline double phase_isotropic() {
     return 1.0 / (4.0 * M_PI);
+}
+
+// Henyey-Greenstein phase function p(cos θ; g) for cos θ = dot(ω_in, ω_out).
+// Reduces to isotropic when |g| is tiny. g in (-1, 1).
+inline double phase_hg(double cos_theta, double g) {
+    if (std::abs(g) < 1e-4) return 1.0 / (4.0 * M_PI);
+    const double denom = 1.0 + g * g - 2.0 * g * cos_theta;
+    return (1.0 - g * g) / (4.0 * M_PI * denom * std::sqrt(std::max(denom, 1e-12)));
 }
 
 // ---------------------------------------------------------------------------
