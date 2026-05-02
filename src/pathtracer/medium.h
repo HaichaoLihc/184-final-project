@@ -28,13 +28,35 @@ struct Medium {
     double   fade_height;   ///< 0 = homogeneous; otherwise smoothstep in y
     double   max_shadow_dist; ///< cap for directional/infinite-light shadow rays
 
+    // Wavy top-face perturbation. The top face of the medium BBox is at
+    // y = bounds->max.y; with boundary_amp > 0 we instead treat it as
+    //   y_top(x, z) = bounds->max.y + boundary_amp * h(x, z)
+    // where h is a sum of sinusoids. This produces (x, z)-dependent path
+    // lengths through the medium for both camera rays entering from above
+    // and shadow rays exiting upward — i.e. the visual signature of "god
+    // rays under a wavy water surface". No geometry change; only the
+    // analytic ray-segment endpoints in clip_ray() shift.
+    double   boundary_amp;
+    double   boundary_freq;
+
     // Scalar constructor kept for backward compatibility. Env vars override.
     Medium(double sa, double ss, BBox* b = nullptr, double fh = 0.0)
         : sigma_a(sa), sigma_s(ss),
           bounds(b),
           fade_height(fh),
-          max_shadow_dist(std::numeric_limits<double>::infinity()) {
+          max_shadow_dist(std::numeric_limits<double>::infinity()),
+          boundary_amp(0.0),
+          boundary_freq(8.0) {
         override_from_env();
+    }
+
+    // Sum-of-sinusoids height field h(x, z) for the wavy top face. Range
+    // roughly in [-1.5, 1.5]; multiplied by boundary_amp at the call site.
+    double boundary_height(double x, double z) const {
+        const double k1 = boundary_freq;
+        const double k2 = boundary_freq * 1.7;
+        return std::sin(k1 * x + 0.31) * std::cos(k1 * z + 1.27)
+             + 0.5 * std::sin(k2 * (x + z) + 2.11);
     }
 
     // --- Coefficient accessors ---
@@ -62,6 +84,10 @@ struct Medium {
     }
 
     // --- Ray segment clipping against the medium bounds ---
+    // When boundary_amp > 0, whichever endpoint corresponds to the top face
+    // (y ≈ bounds->max.y) is shifted by amp * h(x, z) / r.d.y, which is the
+    // first-order solution of r.o.y + t * r.d.y = ymax + amp * h(x, z) at
+    // the unperturbed (x, z). Accurate to O(amp^2) for small amplitudes.
     bool clip_ray(const Ray& r, double& t_enter, double& t_exit) const {
         if (!bounds) {
             t_enter = r.min_t;
@@ -70,6 +96,20 @@ struct Medium {
         }
         double t0 = 0.0, t1 = INF_D;
         if (!bounds->intersect(r, t0, t1)) return false;
+
+        if (boundary_amp > 0.0 && std::abs(r.d.y) > 1e-6) {
+            const double ymax = bounds->max.y;
+            for (double* tp : {&t0, &t1}) {
+                const double y_at = r.o.y + (*tp) * r.d.y;
+                if (std::abs(y_at - ymax) < 1e-3) {
+                    const double x = r.o.x + (*tp) * r.d.x;
+                    const double z = r.o.z + (*tp) * r.d.z;
+                    *tp = (ymax + boundary_amp * boundary_height(x, z) - r.o.y) / r.d.y;
+                }
+            }
+            if (t0 > t1) std::swap(t0, t1);
+        }
+
         t_enter = std::max(t0, r.min_t);
         t_exit  = t1;
         return t_enter < t_exit;
@@ -150,6 +190,8 @@ struct Medium {
         sigma_s.y = rd("MEDIUM_SIGMA_S_G", sigma_s.y);
         sigma_s.z = rd("MEDIUM_SIGMA_S_B", sigma_s.z);
         max_shadow_dist = rd("MEDIUM_MAX_DIST", max_shadow_dist);
+        boundary_amp    = rd("MEDIUM_BOUNDARY_AMP",  boundary_amp);
+        boundary_freq   = rd("MEDIUM_BOUNDARY_FREQ", boundary_freq);
     }
 };
 
