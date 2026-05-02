@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Produce CBbunny_water.dae from CBbunny.dae by inserting a horizontal glass
-slab (the air-water interface) at y = SURFACE_Y.
+slab (the air-water interface) at world y = SURFACE_Y.
 
-Above the surface (y > SURFACE_Y) = air (vacuum).
-Below the surface (y < SURFACE_Y) = water (chromatic participating medium,
-configured in raytraced_renderer.cpp; BBox must have ymax = SURFACE_Y).
+Above the surface (world y > SURFACE_Y) = air (vacuum).
+Below the surface (world y < SURFACE_Y) = water (chromatic participating
+medium, configured in raytraced_renderer.cpp; BBox must have ymax = SURFACE_Y).
 
-The slab is a single quad spanning x in [-1, 1], z in [-1, 1] with a
-GlassBSDF (IOR 1.33, no roughness). Normal points up (+y) so refraction
-is from air to water when hit from above.
+CBbunny.dae uses <up_axis>Z_UP</up_axis>, and the COLLADA loader applies
+(x_world, y_world, z_world) = (-x_dae, z_dae, y_dae). To place a horizontal
+slab at world y = SURFACE_Y we therefore write the slab into the DAE with
+DAE z = SURFACE_Y (its DAE-up axis), spanning DAE x and y in [-1, 1], with
+DAE normal (0, 0, 1) which maps to world (0, 1, 0).
 """
 
 import sys
@@ -44,12 +46,13 @@ glass_material = """    <material id="water-material" name="water">
     </material>
 """
 
-# Quad at y = SURFACE_Y, spanning x,z in [-1, 1]. Two triangles.
-# Vertex order: (1, y, -1) (-1, y, -1) (-1, y, 1) (1, y, 1)  -> CCW looking down, normal +y
+# Quad at DAE-z = SURFACE_Y (which maps to world-y = SURFACE_Y under Z_UP),
+# spanning DAE x,y in [-1, 1]. Two triangles. Normal (0,0,1) in DAE coords
+# maps to (0,1,0) in world coords (i.e. pointing up out of the water).
 water_geometry = f"""    <geometry id="water-mesh" name="water">
       <mesh>
         <source id="water-mesh-positions">
-          <float_array id="water-mesh-positions-array" count="12">1 {SURFACE_Y} -1 -1 {SURFACE_Y} -1 -1 {SURFACE_Y} 1 1 {SURFACE_Y} 1</float_array>
+          <float_array id="water-mesh-positions-array" count="12">1 -1 {SURFACE_Y} -1 -1 {SURFACE_Y} -1 1 {SURFACE_Y} 1 1 {SURFACE_Y}</float_array>
           <technique_common>
             <accessor source="#water-mesh-positions-array" count="4" stride="3">
               <param name="X" type="float"/>
@@ -59,7 +62,7 @@ water_geometry = f"""    <geometry id="water-mesh" name="water">
           </technique_common>
         </source>
         <source id="water-mesh-normals">
-          <float_array id="water-mesh-normals-array" count="6">0 1 0 0 1 0</float_array>
+          <float_array id="water-mesh-normals-array" count="6">0 0 1 0 0 1</float_array>
           <technique_common>
             <accessor source="#water-mesh-normals-array" count="2" stride="3">
               <param name="X" type="float"/>
