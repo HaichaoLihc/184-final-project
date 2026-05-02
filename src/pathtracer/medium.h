@@ -39,6 +39,17 @@ struct Medium {
     double   boundary_amp;
     double   boundary_freq;
 
+    // Henyey-Greenstein phase-function asymmetry parameter g in (-1, 1).
+    //   g = 0       -> isotropic (default)
+    //   g > 0       -> forward-peaked (ocean water typical g ~ 0.85)
+    //   g < 0       -> backward-peaked
+    // Anisotropic forward scattering is what makes single-scatter shafts /
+    // god rays actually visible in water and fog: the in-scatter integrand
+    // becomes sharply peaked when the camera ray, scatter point, and light
+    // are roughly collinear. With isotropic scatter no shaft is ever
+    // distinguishable from background — the volume just looks like flat fog.
+    double   hg_g;
+
     // Scalar constructor kept for backward compatibility. Env vars override.
     Medium(double sa, double ss, BBox* b = nullptr, double fh = 0.0)
         : sigma_a(sa), sigma_s(ss),
@@ -46,7 +57,8 @@ struct Medium {
           fade_height(fh),
           max_shadow_dist(std::numeric_limits<double>::infinity()),
           boundary_amp(0.0),
-          boundary_freq(8.0) {
+          boundary_freq(8.0),
+          hg_g(0.0) {
         override_from_env();
     }
 
@@ -192,12 +204,21 @@ struct Medium {
         max_shadow_dist = rd("MEDIUM_MAX_DIST", max_shadow_dist);
         boundary_amp    = rd("MEDIUM_BOUNDARY_AMP",  boundary_amp);
         boundary_freq   = rd("MEDIUM_BOUNDARY_FREQ", boundary_freq);
+        hg_g            = rd("MEDIUM_HG_G",          hg_g);
     }
 };
 
 // Isotropic phase function: p(w, w') = 1/(4π).
 inline double phase_isotropic() {
     return 1.0 / (4.0 * M_PI);
+}
+
+// Henyey-Greenstein phase function p(cos θ; g) for cos θ = dot(ω_in, ω_out).
+// Reduces to isotropic when |g| is tiny. g in (-1, 1).
+inline double phase_hg(double cos_theta, double g) {
+    if (std::abs(g) < 1e-4) return 1.0 / (4.0 * M_PI);
+    const double denom = 1.0 + g * g - 2.0 * g * cos_theta;
+    return (1.0 - g * g) / (4.0 * M_PI * denom * std::sqrt(std::max(denom, 1e-12)));
 }
 
 // ---------------------------------------------------------------------------
