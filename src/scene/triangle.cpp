@@ -1,10 +1,61 @@
 #include "triangle.h"
 
+#include <cmath>
+#include <cstdlib>
+
 #include "CGL/CGL.h"
 #include "GL/glew.h"
+#include "pathtracer/bsdf.h"
 
 namespace CGL {
 namespace SceneObjects {
+
+namespace {
+
+// Shading-normal perturbation for the water surface. We treat any upward-facing
+// glass triangle as water and replace its shading normal with the gradient of a
+// sum-of-sinusoids height field h(x, z). The geometry stays flat, so ray-mesh
+// intersection is unchanged — only the BSDF coordinate frame is perturbed.
+//
+// h(x,z) = A * ( sin(k1*x + p1) * cos(k1*z + p2)
+//              + 0.5 * sin(k2*(x + z) + p3) )
+// shading_n = normalize( (-dh/dx, 1, -dh/dz) )
+//
+// Env vars:
+//   WATER_NORMAL_AMP   — height amplitude (default 0; 0 disables, ~0.04 looks
+//                        like calm water, ~0.1 like noticeable ripples)
+//   WATER_NORMAL_FREQ  — primary spatial frequency (default 8.0)
+void perturb_water_shading_normal(const Vector3D& p,
+                                  const BSDF* bsdf,
+                                  Vector3D& shading_n) {
+  if (shading_n.y < 0.99) return;
+  if (!dynamic_cast<const GlassBSDF*>(bsdf)) return;
+
+  static const double amp = []() {
+    const char* v = std::getenv("WATER_NORMAL_AMP");
+    return v ? std::atof(v) : 0.0;
+  }();
+  if (amp <= 0.0) return;
+
+  static const double freq = []() {
+    const char* v = std::getenv("WATER_NORMAL_FREQ");
+    return v ? std::atof(v) : 8.0;
+  }();
+
+  const double k1 = freq;
+  const double k2 = freq * 1.7;
+  const double p1 = 0.31, p2 = 1.27, p3 = 2.11;
+  const double x = p.x, z = p.z;
+
+  const double dhdx = amp * (k1 * std::cos(k1 * x + p1) * std::cos(k1 * z + p2)
+                           + 0.5 * k2 * std::cos(k2 * (x + z) + p3));
+  const double dhdz = amp * (-k1 * std::sin(k1 * x + p1) * std::sin(k1 * z + p2)
+                           + 0.5 * k2 * std::cos(k2 * (x + z) + p3));
+
+  shading_n = Vector3D(-dhdx, 1.0, -dhdz).unit();
+}
+
+}  // namespace
 
 Triangle::Triangle(const Mesh *mesh, size_t v1, size_t v2, size_t v3) {
   p1 = mesh->positions[v1];
@@ -100,6 +151,7 @@ bool Triangle::intersect(const Ray &r, Intersection *isect) const {
   isect->n = (w * n1 + u * n2 + v * n3).unit();
   isect->primitive = this;
   isect->bsdf = get_bsdf();
+  perturb_water_shading_normal(r.o + t * r.d, isect->bsdf, isect->n);
   return true;
 
 
