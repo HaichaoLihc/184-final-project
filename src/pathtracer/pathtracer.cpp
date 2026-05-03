@@ -360,22 +360,58 @@ Vector3D PathTracer::one_bounce_radiance(const Ray &r,
 
 }
 
+// Direct + indirect lighting at a surface hit, recursing through BSDF
+// samples. Skips NEE direct lighting on delta BSDFs (perfect specular
+// reflection / refraction never coincides with a uniformly-sampled light
+// direction so NEE always returns zero on the delta lobe).
+//
+// Russian roulette: after the first bounce apply a continuation probability
+// of `cont_prob` and de-bias by dividing the surviving contribution.
+//
+// The recursive bounce ray is traced via est_radiance_global_illumination
+// so that volumetric in-scatter and Beer-Lambert transmittance along its
+// segment are accounted for. We accept a small upward bias from
+// double-counting emission for paths that randomly land on a light after
+// a non-delta bounce — in this codebase the only emissive surface is the
+// area light, and the bias is dominated by the gain from finally being
+// able to deliver indirect light through delta refraction.
 Vector3D PathTracer::at_least_one_bounce_radiance(const Ray &r,
                                                   const Intersection &isect) {
   Matrix3x3 o2w;
   make_coord_space(o2w, isect.n);
-  Matrix3x3 w2o = o2w.T();
+  const Matrix3x3 w2o = o2w.T();
 
-  Vector3D hit_p = r.o + r.d * isect.t;
-  Vector3D w_out = w2o * (-r.d);
+  const Vector3D hit_p = r.o + r.d * isect.t;
+  const Vector3D w_out = w2o * (-r.d);
 
   Vector3D L_out(0, 0, 0);
 
-  // TODO: Part 4, Task 2
-  // Returns the one bounce radiance + radiance from extra bounces at this point.
-  // Should be called recursively to simulate extra bounces.
+  const bool is_delta = isect.bsdf->is_delta();
+  if (!is_delta) L_out += one_bounce_radiance(r, isect);
 
+  const size_t depth = r.depth;
+  if ((int)depth + 1 > max_ray_depth) return L_out;
 
+  // Always trace the first bounce; Russian-roulette every bounce after.
+  const double cont_prob = 0.65;
+  const bool apply_rr = depth >= 1;
+  if (apply_rr && !coin_flip(cont_prob)) return L_out;
+
+  Vector3D wi_local;
+  double pdf;
+  const Vector3D f = isect.bsdf->sample_f(w_out, &wi_local, &pdf);
+  if (pdf <= 0.0 || f == Vector3D()) return L_out;
+
+  const Vector3D wi_world = (o2w * wi_local).unit();
+  Ray bounce(hit_p, wi_world);
+  bounce.min_t = EPS_F;
+  bounce.depth = depth + 1;
+
+  const Vector3D L_in = est_radiance_global_illumination(bounce);
+
+  Vector3D contrib = f * L_in * abs_cos_theta(wi_local) / pdf;
+  if (apply_rr) contrib /= cont_prob;
+  L_out += contrib;
   return L_out;
 }
 
@@ -414,7 +450,8 @@ Vector3D PathTracer::est_radiance_global_illumination(const Ray &r) {
       Vector3D L_surf;
       if (hit) {
         Vector3D tr = medium->det_transmittance(r, t_enter, seg_end);
-        L_surf = tr * (zero_bounce_radiance(r, isect) + one_bounce_radiance(r, isect));
+        L_surf = tr * (zero_bounce_radiance(r, isect)
+                       + at_least_one_bounce_radiance(r, isect));
       } else if (envLight) {
         Vector3D tr = medium->det_transmittance(r, t_enter, seg_end);
         L_surf = tr * envLight->sample_dir(r);
@@ -431,7 +468,7 @@ Vector3D PathTracer::est_radiance_global_illumination(const Ray &r) {
   if (!bvh->intersect(r, &isect))
     return envLight ? envLight->sample_dir(r) : L_out;
 
-  L_out = zero_bounce_radiance(r, isect) + one_bounce_radiance(r, isect);
+  L_out = zero_bounce_radiance(r, isect) + at_least_one_bounce_radiance(r, isect);
   return L_out;
   } // surface_path block
 }
