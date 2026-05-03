@@ -310,6 +310,7 @@ void RaytracedRenderer::start_raytracing() {
   pt->camera = camera;
   pt->scene = scene;
   pt->build_volume_photon_map();
+  pt->build_surface_caustic_map();
 
   if (!render_cell) {
     frameBuffer.clear();
@@ -707,6 +708,9 @@ void RaytracedRenderer::worker_thread() {
     fprintf(stdout, "[PathTracer] BVH traced %llu rays.\n", bvh->total_rays);
     fprintf(stdout, "[PathTracer] Average speed %.4f million rays per second.\n", (double)bvh->total_rays / timer.duration() * 1e-6);
     fprintf(stdout, "[PathTracer] Averaged %f intersection tests per ray.\n", (((double)bvh->total_isects)/bvh->total_rays));
+    pt->print_volume_photon_stats();
+    pt->print_volume_beam_stats();
+    pt->print_surface_caustic_stats();
 
     lock_guard<std::mutex> lk(m_done);
     state = DONE;
