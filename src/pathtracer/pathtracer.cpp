@@ -1611,6 +1611,7 @@ Vector3D PathTracer::at_least_one_bounce_radiance(const Ray &r,
     return L_out;
   }
 
+  const size_t rr_start_depth = 3;
   const int num_samples = isect.bsdf->is_delta()
                             ? std::max<size_t>(1, ns_refr)
                             : std::max<size_t>(1, ns_diff);
@@ -1625,12 +1626,22 @@ Vector3D PathTracer::at_least_one_bounce_radiance(const Ray &r,
     }
 
     const Vector3D wi_world = o2w * wi;
+    Vector3D throughput = f * (abs_cos_theta(wi) / pdf);
+
+    if (r.depth >= rr_start_depth) {
+      const double survive =
+          std::max(0.05, std::min(0.95, luminance(throughput)));
+      if (random_uniform() > survive) {
+        continue;
+      }
+      throughput /= survive;
+    }
+
     Ray next_ray(hit_p + wi_world * EPS_F, wi_world,
                  static_cast<int>(r.depth + 1));
     next_ray.min_t = EPS_F;
 
-    indirect += f * est_radiance_global_illumination(next_ray) *
-                (abs_cos_theta(wi) / pdf);
+    indirect += throughput * est_radiance_global_illumination(next_ray);
   }
 
   L_out += indirect / num_samples;
