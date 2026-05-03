@@ -65,15 +65,11 @@ namespace CGL {
         Vector3D estimate_vol_photon_lighting(const Ray& r,
                                               double t_enter,
                                               double t_exit);
-        Vector3D estimate_vol_beam_lighting(const Ray& r,
-                                            double t_enter,
-                                            double t_exit);
         Vector3D estimate_surface_caustic_lighting(const Ray& r,
                                                    const SceneObjects::Intersection& isect);
         void build_volume_photon_map();
         void build_surface_caustic_map();
         void print_volume_photon_stats() const;
-        void print_volume_beam_stats() const;
         void print_surface_caustic_stats() const;
 
         bool shadow_ray_blocked(const Ray& r) const;
@@ -184,64 +180,6 @@ namespace CGL {
                 return (iy * nz + iz) * nx + ix;
             }
         } volume_photon_map;
-
-        struct VolumetricPhotonBeamMap {
-            struct Beam {
-                Vector3D p0;
-                Vector3D dir;
-                Vector3D power;
-                double length = 0.0;
-                double radius = 0.0;
-                BBox bbox;
-            };
-
-            struct Node {
-                BBox bbox;
-                int start = 0;
-                int count = 0;
-                int left = -1;
-                int right = -1;
-
-                bool is_leaf() const { return left < 0 && right < 0; }
-            };
-
-            bool enabled = false;
-            int nx = 0, ny = 0, nz = 0;
-            BBox bounds;
-            double radius = 0.04;
-            double strength = 1.0;
-            Vector3D sigma_t;
-            std::vector<Beam> beams;
-            std::vector<std::vector<int>> cells;
-            std::vector<int> bvh_indices;
-            std::vector<Node> bvh_nodes;
-            mutable std::atomic<unsigned long long> query_count{0};
-            mutable std::atomic<unsigned long long> node_tests{0};
-            mutable std::atomic<unsigned long long> beam_tests{0};
-
-            void clear() {
-                enabled = false;
-                nx = ny = nz = 0;
-                beams.clear();
-                cells.clear();
-                bvh_indices.clear();
-                bvh_nodes.clear();
-                query_count.store(0);
-                node_tests.store(0);
-                beam_tests.store(0);
-            }
-
-            bool valid() const {
-                return enabled && nx > 1 && ny > 1 && nz > 1 &&
-                       !beams.empty() &&
-                       !bvh_nodes.empty() &&
-                       bvh_indices.size() == beams.size();
-            }
-
-            int index(int ix, int iy, int iz) const {
-                return (iy * nz + iz) * nx + ix;
-            }
-        } volume_beam_map;
 
         struct SurfaceCausticPhotonMap {
             struct Photon {

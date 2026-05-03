@@ -161,34 +161,6 @@ void insert_volume_photon(PathTracer::VolumetricPhotonMap& map,
   map.cells[map.index(ix, iy, iz)].push_back(index);
 }
 
-void insert_volume_beam(PathTracer::VolumetricPhotonBeamMap& map,
-                        const PathTracer::VolumetricPhotonBeamMap::Beam& beam) {
-  if (beam.length <= 1e-6) return;
-  const double radius = beam.radius > 0.0 ? beam.radius : map.radius;
-
-  BBox beam_box(beam.p0);
-  beam_box.expand(beam.p0 + beam.dir * beam.length);
-  beam_box.min -= Vector3D(radius);
-  beam_box.max += Vector3D(radius);
-  beam_box.extent = beam_box.max - beam_box.min;
-  beam_box.min.x = std::max(beam_box.min.x, map.bounds.min.x);
-  beam_box.min.y = std::max(beam_box.min.y, map.bounds.min.y);
-  beam_box.min.z = std::max(beam_box.min.z, map.bounds.min.z);
-  beam_box.max.x = std::min(beam_box.max.x, map.bounds.max.x);
-  beam_box.max.y = std::min(beam_box.max.y, map.bounds.max.y);
-  beam_box.max.z = std::min(beam_box.max.z, map.bounds.max.z);
-  beam_box.extent = beam_box.max - beam_box.min;
-  if (beam_box.min.x > beam_box.max.x ||
-      beam_box.min.y > beam_box.max.y ||
-      beam_box.min.z > beam_box.max.z) {
-    return;
-  }
-
-  PathTracer::VolumetricPhotonBeamMap::Beam stored = beam;
-  stored.bbox = beam_box;
-  map.beams.push_back(stored);
-}
-
 bool surface_point_to_cell(const PathTracer::SurfaceCausticPhotonMap& map,
                            const Vector3D& p,
                            int* ix,
@@ -461,254 +433,6 @@ Vector3D gather_volume_photons_bre(const PathTracer::VolumetricPhotonMap& map,
   return L * map.strength;
 }
 
-double beam_kernel_1d(double distance, double radius) {
-  if (radius <= 0.0) return 0.0;
-  const double x = std::abs(distance) / radius;
-  if (x >= 1.0) return 0.0;
-  const double y = 1.0 - x * x;
-  return (15.0 / 16.0) * y * y / radius;
-}
-
-int build_volume_beam_bvh(PathTracer::VolumetricPhotonBeamMap& map,
-                          int start,
-                          int end,
-                          int leaf_size) {
-  PathTracer::VolumetricPhotonBeamMap::Node node;
-  BBox centroid_bounds;
-  for (int i = start; i < end; ++i) {
-    const PathTracer::VolumetricPhotonBeamMap::Beam& beam =
-        map.beams[map.bvh_indices[i]];
-    node.bbox.expand(beam.bbox);
-    centroid_bounds.expand(beam.bbox.centroid());
-  }
-
-  const int node_index = static_cast<int>(map.bvh_nodes.size());
-  map.bvh_nodes.push_back(node);
-  const int count = end - start;
-
-  if (count <= leaf_size || centroid_bounds.empty()) {
-    map.bvh_nodes[node_index].start = start;
-    map.bvh_nodes[node_index].count = count;
-    return node_index;
-  }
-
-  const int num_bins = 12;
-  int best_axis = -1;
-  int best_bin = -1;
-  double best_cost = INF_D;
-
-  for (int axis = 0; axis < 3; ++axis) {
-    const double extent = centroid_bounds.extent[axis];
-    if (extent <= 1e-12) continue;
-
-    BBox bin_bounds[num_bins];
-    int bin_counts[num_bins] = {};
-
-    for (int i = start; i < end; ++i) {
-      const int beam_id = map.bvh_indices[i];
-      const double c = map.beams[beam_id].bbox.centroid()[axis];
-      int bin = static_cast<int>(num_bins *
-          (c - centroid_bounds.min[axis]) / extent);
-      bin = std::max(0, std::min(num_bins - 1, bin));
-      bin_bounds[bin].expand(map.beams[beam_id].bbox);
-      ++bin_counts[bin];
-    }
-
-    BBox left_bounds[num_bins - 1];
-    BBox right_bounds[num_bins - 1];
-    int left_counts[num_bins - 1] = {};
-    int right_counts[num_bins - 1] = {};
-
-    BBox running_left;
-    int count_left = 0;
-    for (int i = 0; i < num_bins - 1; ++i) {
-      running_left.expand(bin_bounds[i]);
-      count_left += bin_counts[i];
-      left_bounds[i] = running_left;
-      left_counts[i] = count_left;
-    }
-
-    BBox running_right;
-    int count_right = 0;
-    for (int i = num_bins - 1; i > 0; --i) {
-      running_right.expand(bin_bounds[i]);
-      count_right += bin_counts[i];
-      right_bounds[i - 1] = running_right;
-      right_counts[i - 1] = count_right;
-    }
-
-    for (int i = 0; i < num_bins - 1; ++i) {
-      if (left_counts[i] == 0 || right_counts[i] == 0) continue;
-      const double cost =
-          left_counts[i] * left_bounds[i].surface_area() +
-          right_counts[i] * right_bounds[i].surface_area();
-      if (cost < best_cost) {
-        best_cost = cost;
-        best_axis = axis;
-        best_bin = i;
-      }
-    }
-  }
-
-  int mid = start + count / 2;
-  if (best_axis >= 0) {
-    const double extent = centroid_bounds.extent[best_axis];
-    auto mid_it = std::partition(
-        map.bvh_indices.begin() + start,
-        map.bvh_indices.begin() + end,
-        [&map, &centroid_bounds, extent, best_axis, best_bin, num_bins](int beam_id) {
-          const double c = map.beams[beam_id].bbox.centroid()[best_axis];
-          int bin = static_cast<int>(num_bins *
-              (c - centroid_bounds.min[best_axis]) / extent);
-          bin = std::max(0, std::min(num_bins - 1, bin));
-          return bin <= best_bin;
-        });
-    mid = static_cast<int>(mid_it - map.bvh_indices.begin());
-  }
-
-  if (mid == start || mid == end) {
-    int axis = 0;
-    if (centroid_bounds.extent.y > centroid_bounds.extent[axis]) axis = 1;
-    if (centroid_bounds.extent.z > centroid_bounds.extent[axis]) axis = 2;
-    mid = start + count / 2;
-    std::nth_element(map.bvh_indices.begin() + start,
-                     map.bvh_indices.begin() + mid,
-                     map.bvh_indices.begin() + end,
-                     [&map, axis](int a, int b) {
-                       return map.beams[a].bbox.centroid()[axis] <
-                              map.beams[b].bbox.centroid()[axis];
-                     });
-  }
-
-  map.bvh_nodes[node_index].left =
-      build_volume_beam_bvh(map, start, mid, leaf_size);
-  map.bvh_nodes[node_index].right =
-      build_volume_beam_bvh(map, mid, end, leaf_size);
-  return node_index;
-}
-
-void build_volume_beam_bvh(PathTracer::VolumetricPhotonBeamMap& map) {
-  map.bvh_indices.clear();
-  map.bvh_nodes.clear();
-  map.query_count.store(0);
-  map.node_tests.store(0);
-  map.beam_tests.store(0);
-
-  if (map.beams.empty()) return;
-
-  map.bvh_indices.resize(map.beams.size());
-  for (size_t i = 0; i < map.beams.size(); ++i) {
-    map.bvh_indices[i] = static_cast<int>(i);
-  }
-
-  const int leaf_size = std::max(1, read_env_int("VBM_BVH_LEAF_SIZE", 8));
-  map.bvh_nodes.reserve(map.beams.size() * 2);
-  build_volume_beam_bvh(map, 0, static_cast<int>(map.beams.size()), leaf_size);
-}
-
-bool closest_beam_beam_1d(const Ray& camera,
-                          double t_min,
-                          double t_max,
-                          const PathTracer::VolumetricPhotonBeamMap::Beam& beam,
-                          double* t_camera,
-                          double* t_beam,
-                          double* distance,
-                          double* sin_theta) {
-  const double cos_theta = std::max(-1.0, std::min(1.0, dot(camera.d, beam.dir)));
-  const double sin2 = std::max(0.0, 1.0 - cos_theta * cos_theta);
-  *sin_theta = std::sqrt(sin2);
-  if (*sin_theta < read_env_double("VBM_MIN_SIN_THETA", 1e-3)) return false;
-
-  const Vector3D w0 = camera.o - beam.p0;
-  const double d = dot(camera.d, w0);
-  const double e = dot(beam.dir, w0);
-  const double denom = sin2;
-  const double tc = (cos_theta * e - d) / denom;
-  const double tb = (e - cos_theta * d) / denom;
-
-  if (tc < t_min || tc > t_max || tb < 0.0 || tb > beam.length) {
-    return false;
-  }
-
-  const Vector3D pc = camera.o + camera.d * tc;
-  const Vector3D pb = beam.p0 + beam.dir * tb;
-  *t_camera = tc;
-  *t_beam = tb;
-  *distance = (pc - pb).norm();
-  return true;
-}
-
-Vector3D gather_volume_beams_1d(const PathTracer::VolumetricPhotonBeamMap& map,
-                                const Ray& r,
-                                double t_enter,
-                                double t_exit,
-                                const Vector3D& sigma_s,
-                                double hg_g) {
-  if (!map.valid()) return Vector3D();
-
-  Vector3D L;
-  unsigned long long node_tests = 0;
-  unsigned long long beam_tests = 0;
-
-  Ray query_ray = r;
-  query_ray.min_t = t_enter;
-  query_ray.max_t = t_exit;
-
-  std::vector<int> stack;
-  stack.reserve(64);
-  stack.push_back(0);
-
-  while (!stack.empty()) {
-    const int node_id = stack.back();
-    stack.pop_back();
-    const PathTracer::VolumetricPhotonBeamMap::Node& node =
-        map.bvh_nodes[node_id];
-
-    double t0 = query_ray.min_t;
-    double t1 = query_ray.max_t;
-    ++node_tests;
-    if (!node.bbox.intersect(query_ray, t0, t1)) continue;
-
-    if (!node.is_leaf()) {
-      if (node.left >= 0) stack.push_back(node.left);
-      if (node.right >= 0) stack.push_back(node.right);
-      continue;
-    }
-
-    for (int i = 0; i < node.count; ++i) {
-      const int beam_id = map.bvh_indices[node.start + i];
-      const PathTracer::VolumetricPhotonBeamMap::Beam& beam =
-          map.beams[beam_id];
-
-      double bt0 = query_ray.min_t;
-      double bt1 = query_ray.max_t;
-      ++beam_tests;
-      if (!beam.bbox.intersect(query_ray, bt0, bt1)) continue;
-
-      double tc, tb, distance, sin_theta;
-      if (!closest_beam_beam_1d(r, t_enter, t_exit, beam,
-                                &tc, &tb, &distance, &sin_theta)) {
-        continue;
-      }
-
-      const double beam_radius = beam.radius > 0.0 ? beam.radius : map.radius;
-      const double kernel = beam_kernel_1d(distance, beam_radius);
-      if (kernel <= 0.0) continue;
-
-      const Vector3D T_cam = exp_transmittance(map.sigma_t, tc - t_enter);
-      const Vector3D T_beam = exp_transmittance(map.sigma_t, tb);
-      const double phase_f = phase_hg(dot(-beam.dir, r.d), hg_g);
-      L += T_cam * sigma_s * beam.power * T_beam *
-           (phase_f * kernel / sin_theta);
-    }
-  }
-
-  map.query_count.fetch_add(1, std::memory_order_relaxed);
-  map.node_tests.fetch_add(node_tests, std::memory_order_relaxed);
-  map.beam_tests.fetch_add(beam_tests, std::memory_order_relaxed);
-  return L * map.strength;
-}
-
 }  // namespace
 
 PathTracer::PathTracer() {
@@ -736,7 +460,6 @@ void PathTracer::clear() {
   scene = NULL;
   camera = NULL;
   volume_photon_map.clear();
-  volume_beam_map.clear();
   surface_caustic_map.clear();
   sampleBuffer.clear();
   sampleCountBuffer.clear();
@@ -1051,12 +774,10 @@ Vector3D PathTracer::estimate_vol_direct_lighting_mis(const Ray& r,
 
 void PathTracer::build_volume_photon_map() {
   volume_photon_map.clear();
-  volume_beam_map.clear();
 
   if (!medium || !medium->bounds || !scene || !bvh) return;
   const bool build_points = read_env_int("VPM_ENABLE", 1) != 0;
-  const bool build_beams = read_env_int("VBM_ENABLE", 0) != 0;
-  if (!build_points && !build_beams) return;
+  if (!build_points) return;
 
   const int res = std::max(4, read_env_int("VPM_GRID_RES", 48));
   const int nx = std::max(4, read_env_int("VPM_GRID_RES_X", res));
@@ -1087,22 +808,8 @@ void PathTracer::build_volume_photon_map() {
     volume_photon_map.cells.assign(nx * ny * nz, std::vector<int>());
   }
 
-  volume_beam_map.enabled = build_beams;
-  volume_beam_map.nx = nx;
-  volume_beam_map.ny = ny;
-  volume_beam_map.nz = nz;
-  volume_beam_map.bounds = data_bounds;
-  volume_beam_map.radius = read_env_double("VBM_RADIUS",
-      read_env_double("VPM_RADIUS", 0.04));
-  volume_beam_map.strength = read_env_double("VBM_STRENGTH", 1.0);
-  volume_beam_map.sigma_t = medium->sigma_t();
-  if (build_beams) {
-    volume_beam_map.beams.reserve(photon_count);
-  }
-
   const int max_depth = std::max(1, read_env_int("VPM_MAX_DEPTH", 8));
   const int rr_start = std::max(1, read_env_int("VPM_RR_START", 3));
-  const int max_beams = std::max(0, read_env_int("VBM_MAX_BEAMS", photon_count));
   const Vector3D sigma_t = medium->sigma_t();
   const Vector3D albedo = medium->albedo_c();
   const double sigma_avg = medium->sigma_t_avg();
@@ -1167,18 +874,6 @@ void PathTracer::build_volume_photon_map() {
             std::log(std::max(1e-12, 1.0 - random_uniform())) / sigma_avg;
       }
 
-      const double event_t = std::min(scatter_t, segment_end);
-      if (build_beams && event_t > t_enter &&
-          static_cast<int>(volume_beam_map.beams.size()) < max_beams) {
-        VolumetricPhotonBeamMap::Beam beam;
-        beam.p0 = photon_ray.o + photon_ray.d * t_enter;
-        beam.dir = photon_ray.d;
-        beam.length = event_t - t_enter;
-        beam.power = power;
-        beam.radius = volume_beam_map.radius;
-        insert_volume_beam(volume_beam_map, beam);
-      }
-
       if (scatter_t < segment_end) {
         const Vector3D T = exp_transmittance(sigma_t, scatter_t - t_enter);
         const Vector3D scatter_power = power * T * albedo;
@@ -1236,25 +931,18 @@ void PathTracer::build_volume_photon_map() {
     }
   }
 
-  if (build_points && !volume_photon_map.valid()) {
+  if (!volume_photon_map.valid()) {
     volume_photon_map.clear();
   }
-  if (build_points && volume_photon_map.valid() &&
+  if (volume_photon_map.valid() &&
       read_env_int("VPM_BRE_ENABLE", 1) != 0) {
     build_volume_photon_bre(volume_photon_map);
   }
-  if (build_beams && !volume_beam_map.valid()) {
-    build_volume_beam_bvh(volume_beam_map);
-  }
-  if (build_beams && !volume_beam_map.valid()) {
-    volume_beam_map.clear();
-  }
 
   fprintf(stdout,
-          "[PathTracer] Built volume photon data: %dx%dx%d point grid, %zu points, %zu BRE nodes, %zu beams, %zu beam BVH nodes from %d launched paths.\n",
+          "[PathTracer] Built volume photon data: %dx%dx%d point grid, %zu points, %zu BRE nodes from %d launched paths.\n",
           nx, ny, nz, volume_photon_map.photons.size(),
           volume_photon_map.bre_nodes.size(),
-          volume_beam_map.beams.size(), volume_beam_map.bvh_nodes.size(),
           launched);
 }
 
@@ -1457,14 +1145,6 @@ void PathTracer::print_volume_photon_stats() const {
           static_cast<double>(photon_tests) / queries);
 }
 
-Vector3D PathTracer::estimate_vol_beam_lighting(const Ray& r,
-                                                double t_enter,
-                                                double t_exit) {
-  if (!medium || !volume_beam_map.valid() || t_exit <= t_enter) return Vector3D();
-  return gather_volume_beams_1d(volume_beam_map, r, t_enter, t_exit,
-                                medium->sigma_s, medium->hg_g);
-}
-
 Vector3D PathTracer::estimate_surface_caustic_lighting(
     const Ray& r,
     const Intersection& isect) {
@@ -1521,21 +1201,6 @@ Vector3D PathTracer::estimate_surface_caustic_lighting(
 
   const double norm = 3.0 / (PI * radius * radius);
   return L_out * (surface_caustic_map.strength * norm);
-}
-
-void PathTracer::print_volume_beam_stats() const {
-  if (!volume_beam_map.valid()) return;
-
-  const unsigned long long queries = volume_beam_map.query_count.load();
-  if (queries == 0) return;
-
-  const unsigned long long node_tests = volume_beam_map.node_tests.load();
-  const unsigned long long beam_tests = volume_beam_map.beam_tests.load();
-  fprintf(stdout,
-          "[PathTracer] Beam BVH handled %llu volume queries, averaging %.2f node tests and %.2f beam tests each.\n",
-          queries,
-          static_cast<double>(node_tests) / queries,
-          static_cast<double>(beam_tests) / queries);
 }
 
 void PathTracer::print_surface_caustic_stats() const {
@@ -1690,13 +1355,6 @@ Vector3D PathTracer::est_radiance_global_illumination(const Ray &r) {
           L_vol += estimate_vol_photon_lighting(r, t_enter, seg_end);
         }
       }
-      const int vbm_max_query_depth =
-          std::max(0, read_env_int("VBM_MAX_QUERY_DEPTH", 0));
-      if (read_env_int("VBM_ENABLE", 0) != 0 &&
-          r.depth <= static_cast<size_t>(vbm_max_query_depth)) {
-        L_vol += estimate_vol_beam_lighting(r, t_enter, seg_end);
-      }
-
       // Surface / environment contribution attenuated by chromatic
       // transmittance across the full medium segment. Depth-dependent color
       // shift (red attenuates faster than blue) emerges naturally from the
