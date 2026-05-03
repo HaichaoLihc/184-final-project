@@ -60,6 +60,7 @@ namespace CGL {
                                                   double t_enter,
                                                   double t_exit);
 
+        bool shadow_ray_blocked(const Ray& r) const;
         Vector3D est_radiance_global_illumination(const Ray& r);
         Vector3D zero_bounce_radiance(const Ray& r, const SceneObjects::Intersection& isect);
         Vector3D one_bounce_radiance(const Ray& r, const SceneObjects::Intersection& isect);

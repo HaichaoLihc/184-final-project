@@ -7,6 +7,7 @@
 #include <random>
 #include <algorithm>
 #include <sstream>
+#include <cstdlib>
 
 #include "CGL/CGL.h"
 #include "CGL/vector3D.h"
@@ -71,6 +72,9 @@ RaytracedRenderer::RaytracedRenderer(size_t ns_aa,
   Medium* water = new Medium(0.0, 0.0, fog_region, 0.0);
   water->sigma_a = Vector3D(0.35, 0.10, 0.03);
   water->sigma_s = Vector3D(0.20, 0.25, 0.30);
+  if (!std::getenv("MEDIUM_BOUNDARY_AMP"))  water->boundary_amp = 0.035;
+  if (!std::getenv("MEDIUM_BOUNDARY_FREQ")) water->boundary_freq = 8.0;
+  if (!std::getenv("MEDIUM_HG_G"))          water->hg_g = 0.75;
   pt->medium = water;
 
   pt->ns_aa = ns_aa;                                        // Number of samples per pixel

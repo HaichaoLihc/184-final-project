@@ -19,6 +19,103 @@ from pathlib import Path
 
 SRC = Path("dae/sky/CBspheres_lambertian.dae")
 DST = Path("dae/sky/CBspheres_underwater.dae")
+SURFACE_Y = 1.1
+
+glass_cgl_extra = """      <extra>
+        <technique profile="CGL">
+          <glass>
+            <reflectance>1 1 1</reflectance>
+            <transmittance>1 1 1</transmittance>
+            <roughness>0</roughness>
+            <ior>1.33</ior>
+          </glass>
+        </technique>
+      </extra>
+"""
+
+water_effect = """    <effect id="water-effect">
+      <profile_COMMON>
+        <technique sid="common">
+          <phong>
+            <diffuse><color sid="diffuse">0.8 0.9 1 1</color></diffuse>
+          </phong>
+        </technique>
+      </profile_COMMON>
+      <extra>
+        <technique profile="CGL">
+          <glass>
+            <reflectance>1 1 1</reflectance>
+            <transmittance>1 1 1</transmittance>
+            <roughness>0</roughness>
+            <ior>1.33</ior>
+          </glass>
+        </technique>
+      </extra>
+    </effect>
+"""
+
+water_material = """    <material id="water-material" name="water">
+      <instance_effect url="#water-effect"/>
+    </material>
+"""
+
+# Quad at DAE-z = SURFACE_Y, which maps to world-y = SURFACE_Y under the
+# loader's Z_UP conversion. The DAE normal (0,0,1) maps to world up.
+water_geometry = f"""    <geometry id="water-mesh" name="water">
+      <mesh>
+        <source id="water-mesh-positions">
+          <float_array id="water-mesh-positions-array" count="12">1 -1 {SURFACE_Y} -1 -1 {SURFACE_Y} -1 1 {SURFACE_Y} 1 1 {SURFACE_Y}</float_array>
+          <technique_common>
+            <accessor source="#water-mesh-positions-array" count="4" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="water-mesh-normals">
+          <float_array id="water-mesh-normals-array" count="6">0 0 1 0 0 1</float_array>
+          <technique_common>
+            <accessor source="#water-mesh-normals-array" count="2" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="water-mesh-map-0">
+          <float_array id="water-mesh-map-0-array" count="12">0 1 0 1 0 1 0 1 0 1 0 1</float_array>
+          <technique_common>
+            <accessor source="#water-mesh-map-0-array" count="6" stride="2">
+              <param name="S" type="float"/>
+              <param name="T" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="water-mesh-vertices">
+          <input semantic="POSITION" source="#water-mesh-positions"/>
+        </vertices>
+        <polylist material="water-material" count="2">
+          <input semantic="VERTEX" source="#water-mesh-vertices" offset="0"/>
+          <input semantic="NORMAL" source="#water-mesh-normals" offset="1"/>
+          <input semantic="TEXCOORD" source="#water-mesh-map-0" offset="2" set="0"/>
+          <vcount>3 3 </vcount>
+          <p>0 0 0 1 0 1 2 0 2 0 1 3 2 1 4 3 1 5</p>
+        </polylist>
+      </mesh>
+    </geometry>
+"""
+
+water_node = """      <node id="water" name="water" type="NODE">
+        <instance_geometry url="#water-mesh">
+          <bind_material>
+            <technique_common>
+              <instance_material symbol="water-material" target="#water-material"/>
+            </technique_common>
+          </bind_material>
+        </instance_geometry>
+      </node>
+"""
 
 
 def lookat_matrix_world(eye, target, up=(0.0, 1.0, 0.0)):
@@ -106,6 +203,16 @@ new_light_node = (
 # Boost color from 10 to 30 to keep total emitted power roughly similar but
 # make the source visibly small / sun-like.
 src = SRC.read_text()
+src = src.replace(
+    '      </profile_COMMON>\n    </effect>\n    <effect id="ceiling-effect">',
+    '      </profile_COMMON>\n' + glass_cgl_extra +
+    '    </effect>\n    <effect id="ceiling-effect">',
+    1,
+)
+src = src.replace("  </library_effects>", water_effect + "  </library_effects>", 1)
+src = src.replace("  </library_materials>", water_material + "  </library_materials>", 1)
+src = src.replace("  </library_geometries>", water_geometry + "  </library_geometries>", 1)
+src = src.replace("    </visual_scene>", water_node + "    </visual_scene>", 1)
 
 # Replace ONLY the Area light node's transform. We grep for the unique pattern
 # preceding it. The light node is the one whose <instance_light> follows.

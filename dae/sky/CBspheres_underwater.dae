@@ -96,6 +96,16 @@
           </phong>
         </technique>
       </profile_COMMON>
+      <extra>
+        <technique profile="CGL">
+          <glass>
+            <reflectance>1 1 1</reflectance>
+            <transmittance>1 1 1</transmittance>
+            <roughness>0</roughness>
+            <ior>1.33</ior>
+          </glass>
+        </technique>
+      </extra>
     </effect>
     <effect id="ceiling-effect">
       <profile_COMMON>
@@ -260,6 +270,25 @@
         </technique>
       </profile_COMMON>
     </effect>
+    <effect id="water-effect">
+      <profile_COMMON>
+        <technique sid="common">
+          <phong>
+            <diffuse><color sid="diffuse">0.8 0.9 1 1</color></diffuse>
+          </phong>
+        </technique>
+      </profile_COMMON>
+      <extra>
+        <technique profile="CGL">
+          <glass>
+            <reflectance>1 1 1</reflectance>
+            <transmittance>1 1 1</transmittance>
+            <roughness>0</roughness>
+            <ior>1.33</ior>
+          </glass>
+        </technique>
+      </extra>
+    </effect>
   </library_effects>
   <library_materials>
     <material id="lambertian" name="lambertian">
@@ -285,6 +314,9 @@
     </material>
     <material id="backWall-material" name="backWall">
       <instance_effect url="#backWall-effect"/>
+    </material>
+    <material id="water-material" name="water">
+      <instance_effect url="#water-effect"/>
     </material>
   </library_materials>
   <library_geometries>
@@ -564,6 +596,49 @@
         </polylist>
       </mesh>
     </geometry>
+    <geometry id="water-mesh" name="water">
+      <mesh>
+        <source id="water-mesh-positions">
+          <float_array id="water-mesh-positions-array" count="12">1 -1 1.1 -1 -1 1.1 -1 1 1.1 1 1 1.1</float_array>
+          <technique_common>
+            <accessor source="#water-mesh-positions-array" count="4" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="water-mesh-normals">
+          <float_array id="water-mesh-normals-array" count="6">0 0 1 0 0 1</float_array>
+          <technique_common>
+            <accessor source="#water-mesh-normals-array" count="2" stride="3">
+              <param name="X" type="float"/>
+              <param name="Y" type="float"/>
+              <param name="Z" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <source id="water-mesh-map-0">
+          <float_array id="water-mesh-map-0-array" count="12">0 1 0 1 0 1 0 1 0 1 0 1</float_array>
+          <technique_common>
+            <accessor source="#water-mesh-map-0-array" count="6" stride="2">
+              <param name="S" type="float"/>
+              <param name="T" type="float"/>
+            </accessor>
+          </technique_common>
+        </source>
+        <vertices id="water-mesh-vertices">
+          <input semantic="POSITION" source="#water-mesh-positions"/>
+        </vertices>
+        <polylist material="water-material" count="2">
+          <input semantic="VERTEX" source="#water-mesh-vertices" offset="0"/>
+          <input semantic="NORMAL" source="#water-mesh-normals" offset="1"/>
+          <input semantic="TEXCOORD" source="#water-mesh-map-0" offset="2" set="0"/>
+          <vcount>3 3 </vcount>
+          <p>0 0 0 1 0 1 2 0 2 0 1 3 2 1 4 3 1 5</p>
+        </polylist>
+      </mesh>
+    </geometry>
   </library_geometries>
   <library_controllers/>
   <library_visual_scenes>
@@ -652,6 +727,15 @@
           <bind_material>
             <technique_common>
               <instance_material symbol="backWall-material" target="#backWall-material"/>
+            </technique_common>
+          </bind_material>
+        </instance_geometry>
+      </node>
+      <node id="water" name="water" type="NODE">
+        <instance_geometry url="#water-mesh">
+          <bind_material>
+            <technique_common>
+              <instance_material symbol="water-material" target="#water-material"/>
             </technique_common>
           </bind_material>
         </instance_geometry>

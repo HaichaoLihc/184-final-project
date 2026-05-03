@@ -6,10 +6,20 @@
 #include "pathtracer/sampler.h"
 #include "util/random_util.h"
 
+#include <algorithm>
 
 using namespace CGL::SceneObjects;
 
 namespace CGL {
+
+namespace {
+
+bool is_transmissive_shadow_surface(const BSDF* bsdf) {
+  return dynamic_cast<const GlassBSDF*>(bsdf) ||
+         dynamic_cast<const RefractionBSDF*>(bsdf);
+}
+
+}  // namespace
 
 PathTracer::PathTracer() {
   gridSampler = new UniformGridSampler2D();
@@ -39,6 +49,30 @@ void PathTracer::clear() {
   sampleCountBuffer.clear();
   sampleBuffer.resize(0, 0);
   sampleCountBuffer.resize(0, 0);
+}
+
+bool PathTracer::shadow_ray_blocked(const Ray& r) const {
+  Ray shadow = r;
+  double remaining = r.max_t;
+
+  // Treat ideal transmissive surfaces as transparent to shadow rays. This is
+  // an approximation for direct/volume light sampling: it avoids letting the
+  // water interface become an opaque blocker while the actual camera/specular
+  // paths still use the glass BSDF and Snell refraction.
+  for (int skipped = 0; skipped < 16; ++skipped) {
+    shadow.max_t = remaining;
+    Intersection isect;
+    if (!bvh->intersect(shadow, &isect)) return false;
+    if (!is_transmissive_shadow_surface(isect.bsdf)) return true;
+
+    const double step = isect.t + EPS_F;
+    if (step >= remaining) return false;
+    shadow.o = shadow.o + shadow.d * step;
+    shadow.min_t = EPS_F;
+    remaining -= step;
+  }
+
+  return true;
 }
 
 void PathTracer::write_to_framebuffer(ImageBuffer &framebuffer, size_t x0,
@@ -89,9 +123,18 @@ PathTracer::estimate_direct_lighting_hemisphere(const Ray &r,
     shadow_ray.min_t = EPS_F;
 
     Intersection light_isect;
-    if (!bvh->intersect(shadow_ray, &light_isect)) {
-      continue;
+    bool hit_light_path = false;
+    for (int skipped = 0; skipped < 16; ++skipped) {
+      if (!bvh->intersect(shadow_ray, &light_isect)) break;
+      if (!is_transmissive_shadow_surface(light_isect.bsdf)) {
+        hit_light_path = true;
+        break;
+      }
+      shadow_ray.o = shadow_ray.o + shadow_ray.d * (light_isect.t + EPS_F);
+      shadow_ray.min_t = EPS_F;
+      shadow_ray.max_t = INF_D;
     }
+    if (!hit_light_path) continue;
 
     const Vector3D emission = light_isect.bsdf->get_emission();
     if (emission == Vector3D()) {
@@ -147,8 +190,7 @@ PathTracer::estimate_direct_lighting_importance(const Ray &r,
       shadow_ray.min_t = EPS_F;
       shadow_ray.max_t = dist_to_light - EPS_F;
 
-      Intersection blocker;
-      if (bvh->intersect(shadow_ray, &blocker)) {
+      if (shadow_ray_blocked(shadow_ray)) {
         continue;
       }
 
@@ -211,8 +253,7 @@ Vector3D PathTracer::estimate_vol_direct_lighting_mis(const Ray& r,
     Ray shadow_ray(p_scat, wi);
     shadow_ray.min_t = EPS_F;
     shadow_ray.max_t = dist - EPS_F;
-    Intersection blocker;
-    if (bvh->intersect(shadow_ray, &blocker)) return Vector3D();
+    if (shadow_ray_blocked(shadow_ray)) return Vector3D();
 
     const Vector3D T_cam = medium->det_transmittance(r, t_enter, t);
     const Vector3D T_sh  = medium->ray_transmittance(shadow_ray, dist);
@@ -259,8 +300,7 @@ Vector3D PathTracer::estimate_vol_direct_lighting_mis(const Ray& r,
         Ray shadow(p_scat, wi_s);
         shadow.min_t = EPS_F;
         shadow.max_t = d_s - EPS_F;
-        Intersection blocker;
-        if (bvh->intersect(shadow, &blocker)) continue;
+        if (shadow_ray_blocked(shadow)) continue;
 
         const Vector3D T_cam = medium->det_transmittance(r, t_enter, t);
         const Vector3D T_sh  = medium->ray_transmittance(shadow, d_s);
@@ -328,8 +368,7 @@ Vector3D PathTracer::estimate_vol_direct_lighting(const Vector3D& p) {
     shadow_ray.min_t = EPS_F;
     shadow_ray.max_t = dist_to_light - EPS_F;
 
-    Intersection blocker;
-    if (bvh->intersect(shadow_ray, &blocker)) continue;
+    if (shadow_ray_blocked(shadow_ray)) continue;
 
     Vector3D tr = medium ? medium->ray_transmittance(shadow_ray, dist_to_light)
                          : Vector3D(1.0);
@@ -371,10 +410,37 @@ Vector3D PathTracer::at_least_one_bounce_radiance(const Ray &r,
 
   Vector3D L_out(0, 0, 0);
 
-  // TODO: Part 4, Task 2
-  // Returns the one bounce radiance + radiance from extra bounces at this point.
-  // Should be called recursively to simulate extra bounces.
+  if (!isect.bsdf->is_delta()) {
+    L_out += one_bounce_radiance(r, isect);
+  }
 
+  if (r.depth >= max_ray_depth) {
+    return L_out;
+  }
+
+  const int num_samples = isect.bsdf->is_delta()
+                            ? std::max<size_t>(1, ns_refr)
+                            : std::max<size_t>(1, ns_diff);
+  Vector3D indirect;
+
+  for (int i = 0; i < num_samples; ++i) {
+    Vector3D wi;
+    double pdf = 0.0;
+    const Vector3D f = isect.bsdf->sample_f(w_out, &wi, &pdf);
+    if (pdf <= 0.0 || f == Vector3D() || abs_cos_theta(wi) <= 0.0) {
+      continue;
+    }
+
+    const Vector3D wi_world = o2w * wi;
+    Ray next_ray(hit_p + wi_world * EPS_F, wi_world,
+                 static_cast<int>(r.depth + 1));
+    next_ray.min_t = EPS_F;
+
+    indirect += f * est_radiance_global_illumination(next_ray) *
+                (abs_cos_theta(wi) / pdf);
+  }
+
+  L_out += indirect / num_samples;
 
   return L_out;
 }
@@ -414,7 +480,8 @@ Vector3D PathTracer::est_radiance_global_illumination(const Ray &r) {
       Vector3D L_surf;
       if (hit) {
         Vector3D tr = medium->det_transmittance(r, t_enter, seg_end);
-        L_surf = tr * (zero_bounce_radiance(r, isect) + one_bounce_radiance(r, isect));
+        L_surf = tr * (zero_bounce_radiance(r, isect) +
+                       at_least_one_bounce_radiance(r, isect));
       } else if (envLight) {
         Vector3D tr = medium->det_transmittance(r, t_enter, seg_end);
         L_surf = tr * envLight->sample_dir(r);
@@ -431,7 +498,8 @@ Vector3D PathTracer::est_radiance_global_illumination(const Ray &r) {
   if (!bvh->intersect(r, &isect))
     return envLight ? envLight->sample_dir(r) : L_out;
 
-  L_out = zero_bounce_radiance(r, isect) + one_bounce_radiance(r, isect);
+  L_out = zero_bounce_radiance(r, isect) +
+          at_least_one_bounce_radiance(r, isect);
   return L_out;
   } // surface_path block
 }
