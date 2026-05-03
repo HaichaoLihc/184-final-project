@@ -309,6 +309,7 @@ void RaytracedRenderer::start_raytracing() {
   pt->bvh = bvh;
   pt->camera = camera;
   pt->scene = scene;
+  pt->build_volume_photon_map();
 
   if (!render_cell) {
     frameBuffer.clear();

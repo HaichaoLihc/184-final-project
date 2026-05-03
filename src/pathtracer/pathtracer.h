@@ -20,6 +20,8 @@ using CGL::SceneObjects::EnvironmentLight;
 using CGL::SceneObjects::BVHNode;
 using CGL::SceneObjects::BVHAccel;
 
+#include <vector>
+
 namespace CGL {
 
     class PathTracer {
@@ -59,6 +61,10 @@ namespace CGL {
         Vector3D estimate_vol_direct_lighting_mis(const Ray& r,
                                                   double t_enter,
                                                   double t_exit);
+        Vector3D estimate_vol_photon_lighting(const Ray& r,
+                                              double t_enter,
+                                              double t_exit);
+        void build_volume_photon_map();
 
         bool shadow_ray_blocked(const Ray& r) const;
         Vector3D est_radiance_global_illumination(const Ray& r);
@@ -108,6 +114,38 @@ namespace CGL {
         Camera* camera;       ///< current camera
 
         Medium* medium = nullptr; ///< participating medium (null = vacuum)
+
+        struct VolumetricPhotonMap {
+            struct Photon {
+                Vector3D position;
+                Vector3D wi;     ///< direction from photon position toward light
+                Vector3D power;  ///< photon flux carried to the scatter event
+            };
+            bool enabled = false;
+            int nx = 0, ny = 0, nz = 0;
+            BBox bounds;
+            double radius = 0.08;
+            double strength = 1.0;
+            std::vector<Photon> photons;
+            std::vector<std::vector<int>> cells;
+
+            void clear() {
+                enabled = false;
+                nx = ny = nz = 0;
+                photons.clear();
+                cells.clear();
+            }
+
+            bool valid() const {
+                return enabled && nx > 1 && ny > 1 && nz > 1 &&
+                       !photons.empty() &&
+                       cells.size() == static_cast<size_t>(nx * ny * nz);
+            }
+
+            int index(int ix, int iy, int iz) const {
+                return (iy * nz + iz) * nx + ix;
+            }
+        } volume_photon_map;
 
         // Tonemapping Controls //
 
