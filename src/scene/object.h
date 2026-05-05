@@ -20,6 +20,11 @@ class Mesh : public SceneObject {
    */
   Mesh(const HalfedgeMesh& mesh, BSDF* bsdf);
 
+  Mesh(const vector<Vector3D>& positions,
+       const vector<Vector3D>& normals,
+       const vector<size_t>& indices,
+       BSDF* bsdf);
+
   /**
    * Get all the primitives (Triangle) in the mesh.
    * Note that Triangle reference the mesh for the actual data.

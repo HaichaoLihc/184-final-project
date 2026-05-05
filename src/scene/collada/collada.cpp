@@ -848,7 +848,7 @@ void ColladaParser::parse_polymesh(XMLElement* xml, PolymeshInfo& polymesh) {
     }
 
     // normal array indices
-    if (has_normal_array) {
+    if (has_texcoord_array) {
       size_t k = 0;
       for (size_t i = 0; i < num_polygons; ++i) {
         for (size_t j = 0; j < sizes[i]; ++j) {
@@ -1011,7 +1011,7 @@ void ColladaParser::parse_polymesh(XMLElement* xml, PolymeshInfo& polymesh) {
       }
 
       // normal array indices
-      if (has_normal_array) {
+      if (has_texcoord_array) {
         size_t k = 0;
         for (size_t i = 0; i < num_polygons; ++i) {
           for (size_t j = 0; j < sizes[i]; ++j) {

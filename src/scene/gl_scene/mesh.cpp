@@ -31,6 +31,44 @@ Mesh::Mesh(Collada::PolymeshInfo& polyMesh, const Matrix4x4& transform) {
     vertices[i] = (transform * Vector4D(vertices[i], 1)).projectTo3D();
   }
 
+  if (!polyMesh.normals.empty()) {
+    vector<Vector3D> normals = polyMesh.normals; // DELIBERATE COPY.
+    for (int i = 0; i < normals.size(); i++) {
+      normals[i] = (transform * Vector4D(normals[i], 0)).to3D().unit();
+    }
+    for (const Collada::Polygon& p : polyMesh.polygons) {
+      if (p.vertex_indices.size() != p.normal_indices.size() ||
+          p.vertex_indices.size() < 3) {
+        continue;
+      }
+      for (size_t j = 1; j + 1 < p.vertex_indices.size(); ++j) {
+        const size_t vi[3] = {p.vertex_indices[0],
+                              p.vertex_indices[j],
+                              p.vertex_indices[j + 1]};
+        const size_t ni[3] = {p.normal_indices[0],
+                              p.normal_indices[j],
+                              p.normal_indices[j + 1]};
+        const size_t base = imported_positions.size();
+        bool valid = true;
+        for (int k = 0; k < 3; ++k) {
+          if (vi[k] >= vertices.size() || ni[k] >= normals.size()) {
+            valid = false;
+            break;
+          }
+        }
+        if (!valid) continue;
+        for (int k = 0; k < 3; ++k) {
+          imported_positions.push_back(vertices[vi[k]]);
+          imported_normals.push_back(normals[ni[k]]);
+          imported_indices.push_back(base + k);
+        }
+      }
+    }
+    has_imported_normals =
+        imported_positions.size() == imported_normals.size() &&
+        imported_indices.size() >= 3;
+  }
+
   // Read texture coordinates.
   vector<Vector2D> texcoords = polyMesh.texcoords; // DELIBERATE COPY.
 
@@ -532,6 +570,10 @@ BSDF* Mesh::get_bsdf() {
 }
 
 SceneObjects::SceneObject *Mesh::get_static_object() {
+  if (has_imported_normals) {
+    return new SceneObjects::Mesh(imported_positions, imported_normals,
+                                  imported_indices, bsdf);
+  }
   return new SceneObjects::Mesh(mesh, bsdf);
 }
 

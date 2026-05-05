@@ -44,6 +44,22 @@ Mesh::Mesh(const HalfedgeMesh& mesh, BSDF* bsdf) {
 
 }
 
+Mesh::Mesh(const vector<Vector3D>& positions,
+           const vector<Vector3D>& normals,
+           const vector<size_t>& indices,
+           BSDF* bsdf) {
+  this->positions = new Vector3D[positions.size()];
+  this->normals = new Vector3D[normals.size()];
+  for (size_t i = 0; i < positions.size(); ++i) {
+    this->positions[i] = positions[i];
+  }
+  for (size_t i = 0; i < normals.size(); ++i) {
+    this->normals[i] = normals[i];
+  }
+  this->indices = indices;
+  this->bsdf = bsdf;
+}
+
 vector<Primitive*> Mesh::get_primitives() const {
 
   vector<Primitive*> primitives;

@@ -112,6 +112,10 @@ class Mesh : public SceneObject, public MeshView {
   // halfEdge mesh
   HalfedgeMesh mesh;
   MeshResampler resampler;
+  bool has_imported_normals = false;
+  vector<Vector3D> imported_positions;
+  vector<Vector3D> imported_normals;
+  vector<size_t> imported_indices;
 
   // material
   BSDF* bsdf;
