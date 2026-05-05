@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Underwater Volumetric Path Tracing — CS 184 Demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+<script src="deck-stage.js"></script>
+
+<script type="application/json" id="speaker-notes">
+[
+"This renderer has three main underwater lighting features. We'll walk through each one.",
+
+"First — direct volume rendering. When a camera ray passes through water, we sample points along the ray and estimate in-scattering from the light. We use MIS, combining equiangular and distance sampling, to pick better samples. Surface indirect lighting also uses Russian roulette so weak paths terminate early while surviving paths stay unbiased.",
+
+"Second — volumetric photon mapping with BRE and BVH acceleration. We trace photons from the light, refract them through the water surface, and store volume photons where they scatter. Instead of point lookups, we build a BVH over photon regions and gather along the camera ray like a beam — same VPM effect, much faster.",
+
+"Third — surface caustics. Photons refract through the water and hit diffuse surfaces. We store those in a separate surface caustic map and gather at surface hits to create focused bright caustic patterns.",
+
+"Overall: direct volume gives the baseline scattering, VPM with BRE adds photon-based medium lighting efficiently, and surface caustics add refracted patterns on solid objects. Thank you."
+]
+</script>
+
+<style>
+  :root {
+    --bg: #07101a;
+    --ink: #ffffff;
+    --ink-dim: #c9d6e3;
+    --ink-muted: #7891a8;
+    --rule: #1d3147;
+    --cyan: #7cc7d9;
+    --coral: #d4877a;
+    --gold: #e8c87a;
+  }
+
+  html, body {
+    background: #000;
+    margin: 0;
+    padding: 0;
+    color: var(--ink);
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+
+  deck-stage section {
+    background: var(--bg);
+    color: var(--ink);
+    overflow: hidden;
+  }
+
+  /* ---------- shared ---------- */
+  .full {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+  .full .bg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    filter: contrast(1.04) saturate(1.05);
+    z-index: 0;
+  }
+  /* Bottom-anchored protection gradient so caption text reads */
+  .full .scrim-b {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg,
+      rgba(7,16,26,0.05) 0%,
+      rgba(7,16,26,0.1) 40%,
+      rgba(7,16,26,0.65) 75%,
+      rgba(7,16,26,0.92) 100%);
+    z-index: 1;
+  }
+  /* Top-side scrim for title-slide / where titles sit at top */
+  .full .scrim-t {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg,
+      rgba(7,16,26,0.85) 0%,
+      rgba(7,16,26,0.45) 28%,
+      rgba(7,16,26,0.0) 55%);
+    z-index: 1;
+  }
+  /* Side scrim variant for lower-third slides */
+  .full .scrim-side {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg,
+      rgba(7,16,26,0.86) 0%,
+      rgba(7,16,26,0.55) 32%,
+      rgba(7,16,26,0.0) 60%);
+    z-index: 1;
+  }
+  .content {
+    position: relative;
+    z-index: 2;
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+  }
+
+  .eyebrow {
+    font-family: 'Space Mono', monospace;
+    font-size: 26px;
+    letter-spacing: 0.32em;
+    color: var(--cyan);
+    text-transform: uppercase;
+  }
+
+  .footer {
+    position: absolute;
+    left: 100px;
+    right: 100px;
+    bottom: 56px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: 'Space Mono', monospace;
+    font-size: 24px;
+    letter-spacing: 0.2em;
+    color: var(--ink-muted);
+    text-transform: uppercase;
+    z-index: 3;
+  }
+  .footer .num { color: var(--ink); }
+  .footer .dot { color: var(--cyan); }
+
+  /* ---------- slide 1: title (centered/full-bleed) ---------- */
+  .s1 .content {
+    padding: 100px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+  .s1-eyebrow {
+    font-family: 'Space Mono', monospace;
+    font-size: 26px;
+    letter-spacing: 0.32em;
+    color: var(--cyan);
+    text-transform: uppercase;
+  }
+  .s1-title {
+    font-family: 'Inter', sans-serif;
+    font-weight: 200;
+    font-size: 168px;
+    line-height: 0.92;
+    letter-spacing: -0.025em;
+    margin: 0;
+    text-shadow: 0 4px 60px rgba(0,0,0,0.5);
+  }
+  .s1-title em {
+    font-style: italic;
+    font-weight: 300;
+    color: var(--cyan);
+  }
+  .s1-bottom {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+  }
+  .s1-team {
+    font-family: 'Space Mono', monospace;
+    font-size: 28px;
+    color: var(--ink);
+    line-height: 1.6;
+    text-shadow: 0 2px 20px rgba(0,0,0,0.6);
+  }
+  .s1-team span { color: var(--cyan); margin-right: 12px; }
+  .s1-course {
+    font-family: 'Space Mono', monospace;
+    font-size: 24px;
+    letter-spacing: 0.24em;
+    color: var(--ink-dim);
+    text-transform: uppercase;
+    text-align: right;
+  }
+
+  /* ---------- caption-style slides (2,3,4,5) — split layout: image left, text panel right ---------- */
+  .cap .content {
+    display: grid;
+    grid-template-columns: 1.45fr 1fr;
+    height: 100%;
+    padding: 0;
+  }
+  .cap-img {
+    position: relative;
+    background: #000;
+    overflow: hidden;
+  }
+  .cap-img img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    filter: contrast(1.05) saturate(1.06);
+  }
+  .cap-panel {
+    background: var(--bg);
+    padding: 80px 70px 80px 64px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 24px;
+    position: relative;
+  }
+  .cap-panel::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 80px;
+    bottom: 80px;
+    width: 2px;
+    background: linear-gradient(180deg, transparent, var(--cyan) 30%, var(--coral) 70%, transparent);
+  }
+  .cap-step {
+    font-family: 'Space Mono', monospace;
+    font-size: 28px;
+    letter-spacing: 0.32em;
+    color: var(--cyan);
+    text-transform: uppercase;
+  }
+  .cap-title {
+    font-family: 'Inter', sans-serif;
+    font-weight: 300;
+    font-size: 64px;
+    line-height: 1.0;
+    letter-spacing: -0.018em;
+    margin: 0;
+    color: var(--ink);
+  }
+  .cap-title b { font-weight: 600; color: var(--ink); }
+  .cap-title em { font-style: italic; color: var(--cyan); font-weight: 300; }
+  .cap-sub {
+    font-family: 'Space Mono', monospace;
+    font-size: 26px;
+    line-height: 1.5;
+    color: var(--ink-dim);
+    margin: 0;
+  }
+  .cap-sub b { color: var(--cyan); font-weight: 700; }
+
+  .cap-meta {
+    margin-top: 18px;
+    border-top: 1px solid var(--rule);
+    padding-top: 28px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px 28px;
+    font-family: 'Space Mono', monospace;
+  }
+  .cap-meta .row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .cap-meta .k {
+    font-size: 18px;
+    letter-spacing: 0.22em;
+    color: var(--ink-muted);
+    text-transform: uppercase;
+  }
+  .cap-meta .v {
+    font-size: 26px;
+    color: var(--ink);
+    font-weight: 700;
+  }
+  .cap-meta .v small {
+    font-weight: 400;
+    color: var(--ink-dim);
+    font-size: 18px;
+    margin-left: 4px;
+  }
+
+  /* ---------- final slide (6): hero + refs ---------- */
+  .s6 .content {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    height: 100%;
+  }
+  .s6-img {
+    position: relative;
+    background: #000;
+    overflow: hidden;
+  }
+  .s6-img img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    filter: contrast(1.04) saturate(1.05);
+  }
+  .s6-img::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg,
+      rgba(7,16,26,0) 70%,
+      rgba(7,16,26,0.85) 100%);
+  }
+  .s6-text {
+    background: var(--bg);
+    padding: 100px 100px 100px 80px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+  }
+  .s6-text::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 100px;
+    bottom: 100px;
+    width: 2px;
+    background: linear-gradient(180deg, transparent, var(--cyan) 30%, var(--coral) 70%, transparent);
+  }
+  .s6-thanks {
+    font-family: 'Inter', sans-serif;
+    font-weight: 300;
+    font-size: 80px;
+    line-height: 1;
+    margin: 0 0 24px 0;
+    letter-spacing: -0.02em;
+  }
+  .s6-thanks em { font-style: italic; color: var(--cyan); font-weight: 300; }
+  .s6-sub {
+    font-family: 'Space Mono', monospace;
+    font-size: 24px;
+    color: var(--ink-dim);
+    line-height: 1.45;
+    margin: 0;
+  }
+  .refs-block {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .refs-cat {
+    font-family: 'Space Mono', monospace;
+    font-size: 24px;
+    letter-spacing: 0.24em;
+    text-transform: uppercase;
+    color: var(--coral);
+    margin-bottom: 4px;
+  }
+  .refs-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .refs-list li {
+    font-size: 24px;
+    line-height: 1.4;
+    color: var(--ink-dim);
+    font-weight: 300;
+  }
+  .refs-list li b { color: var(--ink); font-weight: 500; }
+  .refs-list li i { font-style: italic; color: var(--ink-dim); font-weight: 400; }
+  .refs-list li .yr {
+    font-family: 'Space Mono', monospace;
+    color: var(--ink-muted);
+    font-size: 24px;
+    margin-right: 8px;
+  }
+</style>
+</head>
+<body>
+
+<deck-stage width="1920" height="1080">
+
+  <!-- =================== SLIDE 1 — TITLE =================== -->
+  <section data-label="01 Title" class="s1">
+    <div class="full">
+      <img class="bg" src="assets/hq_03_vpm_bre_caustics.png" alt="Final underwater render" />
+      <div class="scrim-t"></div>
+      <div class="scrim-b"></div>
+      <div class="content">
+        <div>
+          <div class="s1-eyebrow">CS 184 · Final Project · Demo</div>
+        </div>
+        <div>
+          <h1 class="s1-title">Underwater<br/><em>volumetric</em><br/>path tracing</h1>
+        </div>
+        <div class="s1-bottom">
+          <div class="s1-team">
+            <div><span>·</span>Leon Wu</div>
+            <div><span>·</span>Haichao Li</div>
+            <div><span>·</span>Yuanbo Pang</div>
+            <div><span>·</span>Yutong Xie</div>
+          </div>
+          <div class="s1-course">UC Berkeley<br/>Computer Graphics · 2026</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =================== SLIDE 2 — Direct Volume + MIS =================== -->
+  <section data-label="02 Direct Volume" class="cap">
+    <div class="content">
+      <div class="cap-img">
+        <img src="assets/hq_00_direct_volume_only.png" alt="Direct volume single-scatter render" />
+      </div>
+      <div class="cap-panel">
+        <div class="cap-step">01 / 03</div>
+        <h2 class="cap-title"><em>Direct volume</em><br/>rendering.</h2>
+        <p class="cap-sub">Sample in-scatter along the camera ray &mdash; <b>equiangular + distance MIS</b>.</p>
+        <div class="cap-meta">
+          <div class="row"><span class="k">Resolution</span><span class="v">720 × 540</span></div>
+          <div class="row"><span class="k">Mode</span><span class="v">Direct volume <small>only</small></span></div>
+          <div class="row"><span class="k">Surface caustics</span><span class="v">Off</span></div>
+          <div class="row"><span class="k">VPM</span><span class="v">Off</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="footer">
+      <span>Underwater Path Tracing</span>
+      <span><span class="dot">●</span>&nbsp;&nbsp;<span class="num">02&nbsp;/&nbsp;05</span></span>
+    </div>
+  </section>
+
+  <!-- =================== SLIDE 3 — VPM + BRE / BVH =================== -->
+  <section data-label="03 VPM + BRE" class="cap">
+    <div class="content">
+      <div class="cap-img">
+        <img src="assets/hq_04_vpm_bre_lownoise.png" alt="VPM + BRE low-noise render" />
+      </div>
+      <div class="cap-panel">
+        <div class="cap-step">02 / 03</div>
+        <h2 class="cap-title"><em>Volumetric</em> photon<br/>mapping + <em>BRE</em>.</h2>
+        <p class="cap-sub">Photons scatter in the medium &mdash; <b>BVH-accelerated beam gather</b> along the camera ray.</p>
+        <div class="cap-meta">
+          <div class="row"><span class="k">Resolution</span><span class="v">640 × 480 <small>· 256 spp</small></span></div>
+          <div class="row"><span class="k">Render time</span><span class="v">1273.4 <small>s</small></span></div>
+          <div class="row"><span class="k">Photons stored</span><span class="v">677,480 <small>/ 1.2M</small></span></div>
+          <div class="row"><span class="k">Radius · max depth</span><span class="v">0.065 <small>· 8</small></span></div>
+        </div>
+      </div>
+    </div>
+    <div class="footer">
+      <span>Underwater Path Tracing</span>
+      <span><span class="dot">●</span>&nbsp;&nbsp;<span class="num">03&nbsp;/&nbsp;05</span></span>
+    </div>
+  </section>
+
+  <!-- =================== SLIDE 4 — Surface Caustics =================== -->
+  <section data-label="04 Surface Caustics" class="cap">
+    <div class="content">
+      <div class="cap-img">
+        <img src="assets/hq_03_vpm_bre_caustics.png" alt="VPM + BRE + surface caustics render" />
+      </div>
+      <div class="cap-panel">
+        <div class="cap-step">03 / 03</div>
+        <h2 class="cap-title"><em>Surface</em><br/>caustics.</h2>
+        <p class="cap-sub">Photons refract through water, focus on diffuse surfaces.</p>
+        <div class="cap-meta">
+          <div class="row"><span class="k">Resolution</span><span class="v">1280 × 960 <small>· 64 spp</small></span></div>
+          <div class="row"><span class="k">Render time</span><span class="v">181.6 <small>s</small></span></div>
+          <div class="row"><span class="k">Caustic photons stored</span><span class="v">413,196 <small>/ 720k</small></span></div>
+          <div class="row"><span class="k">Pipeline</span><span class="v">VPM + BRE <small>+ caustics</small></span></div>
+        </div>
+      </div>
+    </div>
+    <div class="footer">
+      <span>Underwater Path Tracing</span>
+      <span><span class="dot">●</span>&nbsp;&nbsp;<span class="num">04&nbsp;/&nbsp;05</span></span>
+    </div>
+  </section>
+
+  <!-- =================== SLIDE 6 — Final + References =================== -->
+  <section data-label="06 References" class="s6">
+    <div class="full">
+      <div class="content">
+        <div class="s6-img">
+          <img src="assets/hq_03_vpm_bre_caustics.png" alt="Final combined render" />
+        </div>
+        <div class="s6-text">
+          <div>
+            <h2 class="s6-thanks">Thank&nbsp;<em>you</em>.</h2>
+            <p class="s6-sub">Full system: medium · MIS direct · BRE VPM · wavy surface · surface caustics.</p>
+          </div>
+
+          <div class="refs-block">
+            <div>
+              <div class="refs-cat">Core rendering</div>
+              <ul class="refs-list">
+                <li><b>Pharr, Jakob &amp; Humphreys</b> · <i>Physically Based Rendering</i></li>
+                <li><span class="yr">2012</span><b>Kulla &amp; Fajardo</b> · <i>Importance Sampling for Participating Media</i></li>
+                <li><span class="yr">2011</span><b>Jarosz et&nbsp;al.</b> · <i>Photon Points and Beams</i></li>
+                <li><span class="yr">1996</span><b>Jensen</b> · <i>Global Illumination using Photon Maps</i></li>
+              </ul>
+            </div>
+            <div>
+              <div class="refs-cat">Project-specific</div>
+              <ul class="refs-list">
+                <li><span class="yr">2018</span><b>Akkaynak &amp; Treibitz</b> · <i>Revised Underwater Image Formation Model</i></li>
+                <li><b>CS 184</b> HW3 path tracer starter code &amp; CGL utilities</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="footer" style="left:120px;right:120px;color:var(--ink-muted);">
+        <span>Underwater Volumetric Path Tracing</span>
+        <span><span class="dot">●</span>&nbsp;&nbsp;<span class="num">05&nbsp;/&nbsp;05</span></span>
+      </div>
+    </div>
+  </section>
+
+</deck-stage>
+
+</body>
+</html>
